@@ -1,0 +1,28 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Dataset (too large for GitHub, and often licensed — don't commit it)
+data/*.csv
+
+# Trained model (can be large, and regenerable via train_model.py)
+models/*.pkl
+
+# Database (generated at runtime, not source code)
+nids.db
+*.db
+
+# Environment/secrets (if you add any later)
+.env
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# VS Code settings (optional — skip this if you want to share workspace settings)
+.vscode/

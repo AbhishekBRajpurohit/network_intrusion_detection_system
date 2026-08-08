@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NIDS Live Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>🛡️ Real-Time Network Intrusion Detection System</h1>
+  </header>
+
+  <section class="stats">
+    <div class="card">
+      <h3 id="stat-packets">0</h3>
+      <p>Packets Captured</p>
+    </div>
+    <div class="card">
+      <h3 id="stat-alerts">0</h3>
+      <p>Alerts Raised</p>
+    </div>
+    <div class="card">
+      <h3 id="stat-blocked">0</h3>
+      <p>IPs Blocked</p>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <canvas id="trafficChart"></canvas>
+  </section>
+
+  <section class="tables">
+    <div class="table-wrap">
+      <h2>Recent Alerts</h2>
+      <table id="alerts-table">
+        <thead>
+          <tr><th>Time</th><th>Source IP</th><th>Attack Type</th><th>Confidence</th><th>Blocked</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="table-wrap">
+      <h2>Recent Traffic</h2>
+      <table id="traffic-table">
+        <thead>
+          <tr><th>Time</th><th>Src IP</th><th>Dst IP</th><th>Proto</th><th>Label</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
