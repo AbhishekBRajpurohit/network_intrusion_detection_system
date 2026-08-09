@@ -1,27 +1,50 @@
-const trafficCtx = document.getElementById('trafficChart').getContext('2d');
-const trafficChart = new Chart(trafficCtx, {
-  type: 'line',
-  data: {
-    labels: [],
-    datasets: [{
-      label: 'Packets / poll',
-      data: [],
-      borderColor: '#5ad1a3',
-      backgroundColor: 'rgba(90, 209, 163, 0.15)',
-      tension: 0.3,
-      fill: true,
-    }]
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    scales: {
-      x: { display: false },
-      y: { beginAtZero: true, ticks: { color: '#9aa0ac' } }
-    },
-    plugins: { legend: { labels: { color: '#e6e6e6' } } }
-  }
-});
+// Simple hand-rolled line chart drawn on <canvas> — no external library needed.
+const trafficCanvas = document.getElementById('trafficChart');
+const trafficCtx = trafficCanvas.getContext('2d');
+const trafficData = []; // rolling window of packet-delta values
+const MAX_POINTS = 30;
+
+function resizeCanvas() {
+  const rect = trafficCanvas.parentElement.getBoundingClientRect();
+  trafficCanvas.width = rect.width;
+  trafficCanvas.height = rect.height;
+}
+
+function drawTrafficChart() {
+  const w = trafficCanvas.width;
+  const h = trafficCanvas.height;
+  trafficCtx.clearRect(0, 0, w, h);
+
+  if (trafficData.length < 2) return;
+
+  const maxVal = Math.max(...trafficData, 1);
+  const padding = 10;
+  const stepX = (w - padding * 2) / (MAX_POINTS - 1);
+
+  const toX = (i) => padding + i * stepX;
+  const toY = (v) => h - padding - (v / maxVal) * (h - padding * 2);
+
+  trafficCtx.beginPath();
+  trafficCtx.moveTo(toX(0), h - padding);
+  trafficData.forEach((v, i) => trafficCtx.lineTo(toX(i), toY(v)));
+  trafficCtx.lineTo(toX(trafficData.length - 1), h - padding);
+  trafficCtx.closePath();
+  trafficCtx.fillStyle = 'rgba(90, 209, 163, 0.15)';
+  trafficCtx.fill();
+
+  trafficCtx.beginPath();
+  trafficData.forEach((v, i) => {
+    const x = toX(i), y = toY(v);
+    if (i === 0) trafficCtx.moveTo(x, y);
+    else trafficCtx.lineTo(x, y);
+  });
+  trafficCtx.strokeStyle = '#5ad1a3';
+  trafficCtx.lineWidth = 2;
+  trafficCtx.stroke();
+}
+
+window.addEventListener('resize', () => { resizeCanvas(); drawTrafficChart(); });
+resizeCanvas();
 
 let lastPacketCount = 0;
 
@@ -39,12 +62,9 @@ async function refreshStats() {
   const delta = Math.max(stats.total_packets - lastPacketCount, 0);
   lastPacketCount = stats.total_packets;
 
-  const labels = trafficChart.data.labels;
-  const data = trafficChart.data.datasets[0].data;
-  labels.push('');
-  data.push(delta);
-  if (labels.length > 30) { labels.shift(); data.shift(); }
-  trafficChart.update();
+  trafficData.push(delta);
+  if (trafficData.length > MAX_POINTS) trafficData.shift();
+  drawTrafficChart();
 }
 
 async function refreshAlerts() {
