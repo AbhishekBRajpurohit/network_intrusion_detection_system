@@ -56,5 +56,5 @@ if __name__ == "__main__":
     # Set to your active network interface name (see README for how to find
     # it via `python -c "from scapy.all import conf; print(conf.ifaces)"`).
     # Use iface=None to let scapy pick a default instead.
-    start_sniffing_background(iface="Intel(R) Wi-Fi 6 AX200 160MHz")
+    start_sniffing_background(iface=None)
     app.run(debug=True, use_reloader=False, host="0.0.0.0", port=5000)
