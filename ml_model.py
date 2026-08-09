@@ -9,6 +9,7 @@ found yet, so the dashboard still works before you've trained anything
 import os
 import joblib
 import numpy as np
+import pandas as pd
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "nids_model.pkl")
 
@@ -30,7 +31,7 @@ class NIDSModel:
 
     def predict(self, features: dict):
         if self.model is not None:
-            x = np.array([[features[f] for f in FEATURE_ORDER]])
+            x = pd.DataFrame([[features[f] for f in FEATURE_ORDER]], columns=FEATURE_ORDER)
             proba = self.model.predict_proba(x)[0]
             idx = np.argmax(proba)
             return self.classes[idx], float(proba[idx])
