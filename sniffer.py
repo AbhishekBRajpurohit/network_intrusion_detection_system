@@ -78,8 +78,16 @@ def _handle_packet(pkt):
     with _lock:
         _ip_windows[src_ip].append({"t": time.time(), "dport": dport, "flag": flag, "len": length})
 
-    features = _extract_features(src_ip)
+   features = _extract_features(src_ip)
     label, confidence = model.predict(features)
+
+    # --- Safety-net rule: catch obvious scans/floods even if the trained
+    # ML model (fit on proxy-scaled NSL-KDD features) misses them due to
+    # feature-scale mismatch with live traffic. ---
+    if features["unique_ports"] > 15 and label == "normal":
+        label, confidence = "port_scan", 0.95
+    elif features["syn_rate"] > 20 and label == "normal":
+        label, confidence = "syn_flood", 0.95
 
     log_traffic(src_ip, dst_ip, proto, length, label=label, confidence=confidence)
 
