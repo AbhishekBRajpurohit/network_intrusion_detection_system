@@ -24,10 +24,16 @@ from ml_model import NIDSModel
 WINDOW_SECONDS = 5          # sliding window for behavioral features
 CONFIDENCE_THRESHOLD = 0.85  # auto-block threshold
 AUTO_BLOCK_ENABLED = True
+ALERT_COOLDOWN_SECONDS = 30  # don't re-alert on the same IP within this window
 
 # per-source-ip rolling packet timestamps + metadata for feature extraction
 _ip_windows = defaultdict(lambda: deque())
 _lock = threading.Lock()
+
+# tracks the last time each source IP triggered an alert, to avoid flooding
+# the dashboard with a near-duplicate alert on every single packet
+_last_alert_time = {}
+_alert_lock = threading.Lock()
 
 model = NIDSModel()
 
@@ -92,12 +98,24 @@ def _handle_packet(pkt):
     log_traffic(src_ip, dst_ip, proto, length, label=label, confidence=confidence)
 
     if label != "normal" and confidence >= CONFIDENCE_THRESHOLD:
+        # Always ensure the IP stays blocked (block_ip is a cheap no-op if
+        # already blocked), but only log a new alert entry once per
+        # cooldown window so the dashboard doesn't flood with near-duplicates.
         blocked = False
         if AUTO_BLOCK_ENABLED:
             blocked = block_ip(src_ip)
-        log_alert(src_ip, label, confidence, blocked=blocked)
-        print(f"[ALERT] {src_ip} flagged as '{label}' (confidence={confidence:.2f}) "
-              f"blocked={blocked}")
+
+        now = time.time()
+        with _alert_lock:
+            last_alert = _last_alert_time.get(src_ip, 0)
+            should_log = (now - last_alert) >= ALERT_COOLDOWN_SECONDS
+            if should_log:
+                _last_alert_time[src_ip] = now
+
+        if should_log:
+            log_alert(src_ip, label, confidence, blocked=blocked)
+            print(f"[ALERT] {src_ip} flagged as '{label}' (confidence={confidence:.2f}) "
+                  f"blocked={blocked}")
 
 
 def start_sniffing(iface=None):
