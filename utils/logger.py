@@ -104,3 +104,24 @@ def get_stats():
         "total_alerts": total_alerts,
         "total_blocked": total_blocked,
     }
+
+def get_blocked_ips():
+    """Returns each currently-blocked IP with when it was first blocked,
+    how many times it's been flagged since, and its most common attack type.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT src_ip,
+               MIN(timestamp) AS first_blocked,
+               MAX(timestamp) AS last_seen,
+               COUNT(*) AS alert_count,
+               attack_type
+        FROM alerts
+        WHERE blocked = 1
+        GROUP BY src_ip
+        ORDER BY last_seen DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return rows
