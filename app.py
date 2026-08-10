@@ -11,7 +11,7 @@ Run with:
 
 from flask import Flask, jsonify, render_template
 
-from utils.logger import init_db, get_recent_traffic, get_recent_alerts, get_stats
+from utils.logger import init_db, get_recent_traffic, get_recent_alerts, get_stats, get_blocked_ips
 from sniffer import start_sniffing_background
 
 app = Flask(__name__)
@@ -49,7 +49,16 @@ def api_alerts():
 @app.route("/api/stats")
 def api_stats():
     return jsonify(get_stats())
-
+@app.route("/api/blocked")
+def api_blocked():
+    rows = get_blocked_ips()
+    return jsonify([
+        {
+            "src_ip": r[0], "first_blocked": r[1], "last_seen": r[2],
+            "alert_count": r[3], "attack_type": r[4],
+        }
+        for r in rows
+    ])
 
 if __name__ == "__main__":
     init_db()
