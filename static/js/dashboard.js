@@ -53,48 +53,66 @@ function fmtTime(ts) {
 }
 
 async function refreshStats() {
-  const res = await fetch('/api/stats');
-  const stats = await res.json();
-  document.getElementById('stat-packets').textContent = stats.total_packets;
-  document.getElementById('stat-alerts').textContent = stats.total_alerts;
-  document.getElementById('stat-blocked').textContent = stats.total_blocked;
+  try {
+    const res = await fetch('/api/stats');
+    if (res.status === 401) { window.location.href = '/login'; return; }
+    const stats = await res.json();
+    document.getElementById('stat-packets').textContent = stats.total_packets ?? stats.traffic ?? 0;
+    document.getElementById('stat-alerts').textContent = stats.total_alerts ?? stats.alerts ?? 0;
+    document.getElementById('stat-blocked').textContent = stats.total_blocked ?? 0;
 
-  const delta = Math.max(stats.total_packets - lastPacketCount, 0);
-  lastPacketCount = stats.total_packets;
+    const currentTotal = stats.total_packets ?? stats.traffic ?? 0;
+    const delta = Math.max(currentTotal - lastPacketCount, 0);
+    lastPacketCount = currentTotal;
 
-  trafficData.push(delta);
-  if (trafficData.length > MAX_POINTS) trafficData.shift();
-  drawTrafficChart();
+    trafficData.push(delta);
+    if (trafficData.length > MAX_POINTS) trafficData.shift();
+    drawTrafficChart();
+  } catch (err) {
+    console.error('Error fetching stats:', err);
+  }
 }
 
 async function refreshAlerts() {
-  const res = await fetch('/api/alerts');
-  const alerts = await res.json();
-  const tbody = document.querySelector('#alerts-table tbody');
-  tbody.innerHTML = alerts.map(a => `
-    <tr>
-      <td>${fmtTime(a.timestamp)}</td>
-      <td>${a.src_ip}</td>
-      <td class="label-attack">${a.attack_type}</td>
-      <td>${(a.confidence * 100).toFixed(0)}%</td>
-      <td>${a.blocked ? '✅' : '—'}</td>
-    </tr>
-  `).join('');
+  try {
+    const res = await fetch('/api/alerts');
+    if (res.status === 401) return;
+    const data = await res.json();
+    const alerts = Array.isArray(data) ? data : (data.rows || []);
+    const tbody = document.querySelector('#alerts-table tbody');
+    tbody.innerHTML = alerts.map(a => `
+      <tr>
+        <td>${fmtTime(a.timestamp)}</td>
+        <td>${a.src_ip || '—'}</td>
+        <td class="label-attack">${a.attack_type || 'unknown'}</td>
+        <td>${a.confidence != null ? (a.confidence * 100).toFixed(0) + '%' : '—'}</td>
+        <td>${a.blocked ? '✅' : '—'}</td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('Error fetching alerts:', err);
+  }
 }
 
 async function refreshTraffic() {
-  const res = await fetch('/api/traffic');
-  const traffic = await res.json();
-  const tbody = document.querySelector('#traffic-table tbody');
-  tbody.innerHTML = traffic.slice(0, 20).map(t => `
-    <tr>
-      <td>${fmtTime(t.timestamp)}</td>
-      <td>${t.src_ip}</td>
-      <td>${t.dst_ip}</td>
-      <td>${t.protocol}</td>
-      <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${t.label}</td>
-    </tr>
-  `).join('');
+  try {
+    const res = await fetch('/api/traffic');
+    if (res.status === 401) return;
+    const data = await res.json();
+    const traffic = Array.isArray(data) ? data : (data.rows || []);
+    const tbody = document.querySelector('#traffic-table tbody');
+    tbody.innerHTML = traffic.slice(0, 20).map(t => `
+      <tr>
+        <td>${fmtTime(t.timestamp)}</td>
+        <td>${t.src_ip || '—'}</td>
+        <td>${t.dst_ip || '—'}</td>
+        <td>${t.protocol || '—'}</td>
+        <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${t.label || 'normal'}</td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('Error fetching traffic:', err);
+  }
 }
 
 function refreshAll() {

@@ -85,22 +85,34 @@ def _handle_packet(pkt):
         _ip_windows[src_ip].append({"t": time.time(), "dport": dport, "flag": flag, "len": length})
 
     features = _extract_features(src_ip)
-    label, confidence = model.predict(features)
+    pred = model.predict(features)
+    if isinstance(pred, dict):
+        label = pred.get("label", "normal")
+        confidence = pred.get("probability")
+        if confidence is None:
+            confidence = 0.95 if label != "normal" else 0.5
+        source = pred.get("source", "rule")
+        severity = pred.get("severity", "info")
+        reason = pred.get("reason", "")
+    else:
+        label, confidence = pred
+        source, severity, reason = "ml", "info", ""
 
-    # --- Safety-net rule: catch obvious scans/floods even if the trained
-    # ML model (fit on proxy-scaled NSL-KDD features) misses them due to
-    # feature-scale mismatch with live traffic. ---
+    # --- Safety-net rule: catch obvious scans/floods even if model missed them ---
     if features["unique_ports"] > 15 and label == "normal":
-        label, confidence = "port_scan", 0.95
+        label, confidence, severity = "port_scan", 0.95, "medium"
+        reason = f"{features['unique_ports']} destination ports in {WINDOW_SECONDS} seconds"
     elif features["syn_rate"] > 20 and label == "normal":
-        label, confidence = "syn_flood", 0.95
+        label, confidence, severity = "syn_flood", 0.95, "high"
+        reason = f"{features['syn_rate']:.1f} initial SYN packets/second"
 
-    log_traffic(src_ip, dst_ip, proto, length, label=label, confidence=confidence)
+    log_traffic(
+        src_ip, dst_ip, proto, length,
+        label=label, confidence=confidence,
+        source=source, severity=severity, reason=reason, features=features
+    )
 
     if label != "normal" and confidence >= CONFIDENCE_THRESHOLD:
-        # Always ensure the IP stays blocked (block_ip is a cheap no-op if
-        # already blocked), but only log a new alert entry once per
-        # cooldown window so the dashboard doesn't flood with near-duplicates.
         blocked = False
         if AUTO_BLOCK_ENABLED:
             blocked = block_ip(src_ip)
@@ -113,9 +125,12 @@ def _handle_packet(pkt):
                 _last_alert_time[src_ip] = now
 
         if should_log:
-            log_alert(src_ip, label, confidence, blocked=blocked)
+            log_alert(
+                src_ip, label, confidence, blocked=blocked,
+                source=source, severity=severity, reason=reason, features=features
+            )
             print(f"[ALERT] {src_ip} flagged as '{label}' (confidence={confidence:.2f}) "
-                  f"blocked={blocked}")
+                  f"blocked={blocked} reason={reason}")
 
 
 def start_sniffing(iface=None):

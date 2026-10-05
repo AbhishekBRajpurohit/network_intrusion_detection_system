@@ -6,8 +6,17 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <header>
+  <header style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
     <h1>🛡️ Real-Time Network Intrusion Detection System</h1>
+    <div style="display: flex; align-items: center; gap: 12px; font-size: 13px;">
+      <a href="{{ url_for('export_csv', table='traffic') }}" style="color: #5ad1a3; text-decoration: none;">📥 Export Traffic CSV</a>
+      <a href="{{ url_for('export_csv', table='alerts') }}" style="color: #5ad1a3; text-decoration: none;">📥 Export Alerts CSV</a>
+      <a href="{{ url_for('pdf') }}" style="color: #5ad1a3; text-decoration: none;">📄 PDF Report</a>
+      <form method="POST" action="{{ url_for('logout') }}" style="margin: 0;">
+        <input type="hidden" name="csrf" value="{{ session.csrf }}">
+        <button type="submit" style="background: #2a2e3a; border: 1px solid #3d4253; color: #e6e6e6; padding: 6px 12px; border-radius: 6px; cursor: pointer;">Sign Out</button>
+      </form>
+    </div>
   </header>
 
   <section class="stats">
