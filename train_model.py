@@ -97,8 +97,17 @@ def main():
     print("Confusion matrix:")
     print(confusion_matrix(y_test, y_pred))
 
-    joblib.dump({"model": clf, "classes": clf.classes_}, MODEL_OUT)
+    from features import FEATURE_ORDER, SCHEMA_VERSION, WINDOW_SECONDS as FE_WINDOW
+    joblib.dump({
+        "model": clf,
+        "classes": clf.classes_,
+        "features": FEATURE_ORDER,
+        "schema_version": SCHEMA_VERSION,
+        "window_seconds": FE_WINDOW,
+    }, MODEL_OUT)
     print(f"[train_model] Saved trained model to {MODEL_OUT}")
+    print(f"[train_model] Bundle metadata: schema={SCHEMA_VERSION}, "
+          f"features={FEATURE_ORDER}, window={FE_WINDOW}s")
 
 
 if __name__ == "__main__":
