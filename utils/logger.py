@@ -48,7 +48,8 @@ def init_db():
             source TEXT,
             severity TEXT,
             reason TEXT,
-            features TEXT
+            features TEXT,
+            status TEXT DEFAULT 'New'
         )
     """)
 
@@ -82,9 +83,12 @@ def init_db():
             c.execute(f"ALTER TABLE traffic ADD COLUMN {col} TEXT")
 
     existing_alert_cols = {r[1] for r in c.execute("PRAGMA table_info(alerts)")}
-    for col in ("source", "severity", "reason", "features"):
+    for col in ("source", "severity", "reason", "features", "status"):
         if col not in existing_alert_cols:
-            c.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+            c.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT DEFAULT 'New'")
+
+    # Ensure any older rows without status are initialized to 'New'
+    c.execute("UPDATE alerts SET status = 'New' WHERE status IS NULL OR status = ''")
 
     conn.commit()
     conn.close()
@@ -171,6 +175,26 @@ def connect():
         conn.close()
 
 
+def _parse_date(val, is_end=False):
+    if not val:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        pass
+    from datetime import datetime, timezone
+    s = str(val).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if fmt == "%Y-%m-%d" and is_end:
+                dt = dt.replace(hour=23, minute=59, second=59)
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 def query(table, args=None, limit=25, offset=0):
     if table not in ("traffic", "alerts"):
         raise ValueError(f"Invalid table: {table}")
@@ -179,9 +203,17 @@ def query(table, args=None, limit=25, offset=0):
     clauses = []
     params = []
 
-    if args.get("src_ip"):
-        clauses.append("src_ip LIKE ?")
-        params.append(f"%{args['src_ip']}%")
+    # IP Search (matches src_ip or dst_ip for traffic; src_ip for alerts)
+    ip_filter = args.get("ip") or args.get("search") or args.get("src_ip")
+    if ip_filter:
+        ip_val = f"%{ip_filter.strip()}%"
+        if table == "traffic":
+            clauses.append("(src_ip LIKE ? OR dst_ip LIKE ?)")
+            params.extend([ip_val, ip_val])
+        else:
+            clauses.append("src_ip LIKE ?")
+            params.append(ip_val)
+
     if args.get("protocol"):
         clauses.append("protocol = ?")
         params.append(args["protocol"])
@@ -194,6 +226,20 @@ def query(table, args=None, limit=25, offset=0):
     if table == "alerts" and args.get("attack_type"):
         clauses.append("attack_type = ?")
         params.append(args["attack_type"])
+    if table == "alerts" and args.get("status"):
+        clauses.append("status = ?")
+        params.append(args["status"])
+
+    # Date filters
+    start_ts = _parse_date(args.get("start_date") or args.get("from_date") or args.get("from"))
+    if start_ts is not None:
+        clauses.append("timestamp >= ?")
+        params.append(start_ts)
+
+    end_ts = _parse_date(args.get("end_date") or args.get("to_date") or args.get("to"), is_end=True)
+    if end_ts is not None:
+        clauses.append("timestamp <= ?")
+        params.append(end_ts)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
@@ -274,15 +320,37 @@ def log_traffic(src_ip, dst_ip, protocol, length, label="normal", confidence=0.0
 
 
 def log_alert(src_ip, attack_type, confidence, blocked=False,
-              source="rule", severity="high", reason=None, features=None):
+              source="rule", severity="high", reason=None, features=None, status="New"):
     if isinstance(features, dict):
         features = json.dumps(features)
     with connect() as conn:
         conn.execute(
-            "INSERT INTO alerts (timestamp, src_ip, attack_type, confidence, blocked, source, severity, reason, features) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), src_ip, attack_type, confidence, int(blocked), source, severity, reason, features),
+            "INSERT INTO alerts (timestamp, src_ip, attack_type, confidence, blocked, source, severity, reason, features, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), src_ip, attack_type, confidence, int(blocked), source, severity, reason, features, status),
         )
+
+
+def update_alert_status(alert_id, status):
+    if status not in ("New", "Investigating", "Resolved"):
+        raise ValueError(f"Invalid alert status: {status}")
+    with connect() as conn:
+        cur = conn.execute("UPDATE alerts SET status = ? WHERE id = ?", (status, alert_id))
+        return cur.rowcount > 0
+
+
+def get_alert(alert_id):
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if d.get("features") and isinstance(d["features"], str):
+            try:
+                d["features"] = json.loads(d["features"])
+            except Exception:
+                pass
+        return d
 
 
 def log_audit(action, ip, success=True, detail=""):
