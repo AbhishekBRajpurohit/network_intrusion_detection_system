@@ -63,6 +63,18 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS capture_status (
+            id INTEGER PRIMARY KEY,
+            state TEXT NOT NULL,
+            interface TEXT,
+            error TEXT,
+            started_at REAL,
+            updated_at REAL,
+            pid INTEGER
+        )
+    """)
+
     # Migrate existing tables if they lack new columns
     existing_traffic_cols = {r[1] for r in c.execute("PRAGMA table_info(traffic)")}
     for col in ("source", "severity", "reason", "features"):
@@ -76,6 +88,73 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def _ensure_capture_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS capture_status (
+            id INTEGER PRIMARY KEY,
+            state TEXT NOT NULL,
+            interface TEXT,
+            error TEXT,
+            started_at REAL,
+            updated_at REAL,
+            pid INTEGER
+        )
+    """)
+
+
+def update_capture_status(state, interface=None, error=None, started_at=None):
+    now = time.time()
+    pid = os.getpid()
+    with connect() as conn:
+        _ensure_capture_table(conn)
+        row = conn.execute("SELECT id, started_at FROM capture_status WHERE id = 1").fetchone()
+        if row:
+            st = started_at if started_at is not None else row["started_at"]
+            conn.execute(
+                "UPDATE capture_status SET state = ?, interface = ?, error = ?, started_at = ?, updated_at = ?, pid = ? WHERE id = 1",
+                (state, interface, error, st, now, pid),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO capture_status (id, state, interface, error, started_at, updated_at, pid) VALUES (1, ?, ?, ?, ?, ?, ?)",
+                (state, interface, error, started_at or now, now, pid),
+            )
+
+
+def read_capture_status(heartbeat_timeout=8.0):
+    try:
+        with connect() as conn:
+            _ensure_capture_table(conn)
+            row = conn.execute("SELECT * FROM capture_status WHERE id = 1").fetchone()
+            if not row:
+                return {"state": "stopped", "interface": None}
+            data = dict(row)
+            state = data["state"]
+            now = time.time()
+            if state == "running":
+                if now - (data["updated_at"] or 0) > heartbeat_timeout:
+                    return {"state": "stopped", "interface": None}
+                uptime = round(now - (data["started_at"] or now), 1)
+                return {
+                    "state": "running",
+                    "interface": data["interface"],
+                    "uptime_seconds": uptime,
+                }
+            elif state == "error":
+                return {
+                    "state": "error",
+                    "interface": data["interface"],
+                    "error": data["error"],
+                }
+            else:
+                return {
+                    "state": "stopped",
+                    "interface": data["interface"],
+                }
+    except Exception as exc:
+        return {"state": "unknown", "error": str(exc)}
 
 
 @contextlib.contextmanager
@@ -173,10 +252,12 @@ def get_status():
     except Exception as e:
         det_mode = f"Error loading model: {e}"
 
+    capture = read_capture_status()
+
     return {
-        "status": "online",
+        "status": capture.get("state", "unknown"),
         "detection_mode": det_mode,
-        "capture": "standalone sniffer",
+        "capture": capture,
     }
 
 

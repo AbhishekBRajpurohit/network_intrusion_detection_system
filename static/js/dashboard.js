@@ -115,10 +115,38 @@ async function refreshTraffic() {
   }
 }
 
+async function refreshStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (res.status === 401) return;
+    const data = await res.json();
+    const capture = data.capture || {};
+    const state = capture.state || data.status || 'unknown';
+
+    const dot = document.getElementById('capture-dot');
+    const label = document.getElementById('capture-label');
+
+    const colors = { running: '#5ad1a3', stopped: '#888', error: '#e85d75', unknown: '#f0a500' };
+    dot.style.background = colors[state] || colors.unknown;
+
+    let text = state.charAt(0).toUpperCase() + state.slice(1);
+    if (state === 'running' && capture.interface) {
+      text += ` (${capture.interface})`;
+    }
+    if (state === 'error' && capture.error) {
+      text += `: ${capture.error}`;
+    }
+    label.textContent = text;
+  } catch (err) {
+    console.error('Error fetching status:', err);
+  }
+}
+
 function refreshAll() {
   refreshStats();
   refreshAlerts();
   refreshTraffic();
+  refreshStatus();
 }
 
 refreshAll();
