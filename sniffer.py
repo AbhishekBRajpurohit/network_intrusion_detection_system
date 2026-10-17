@@ -16,22 +16,21 @@ It is normally imported and started from app.py.
 import argparse
 import time
 import threading
-from collections import defaultdict, deque
 
-from scapy.all import sniff, IP, TCP, UDP, get_if_list, get_if_addr, conf
+from scapy.all import sniff, get_if_list, get_if_addr, conf
 
-from utils.logger import log_traffic, log_alert
+from features import FeatureExtractor, packet_record, extract_record
+from utils.logger import log_traffic, log_alert, update_capture_status, read_capture_status
 from utils.firewall import block_ip
 from ml_model import NIDSModel
 
-WINDOW_SECONDS = 5          # sliding window for behavioral features
 CONFIDENCE_THRESHOLD = 0.85  # auto-block threshold
 AUTO_BLOCK_ENABLED = True
 ALERT_COOLDOWN_SECONDS = 30  # don't re-alert on the same IP within this window
 
-# per-source-ip rolling packet timestamps + metadata for feature extraction
-_ip_windows = defaultdict(lambda: deque())
-_lock = threading.Lock()
+# Shared feature extractor (replaces the old hand-rolled _ip_windows dict)
+_extractor = FeatureExtractor()
+_extractor_lock = threading.Lock()
 
 # tracks the last time each source IP triggered an alert, to avoid flooding
 # the dashboard with a near-duplicate alert on every single packet
@@ -40,77 +39,61 @@ _alert_lock = threading.Lock()
 
 model = NIDSModel()
 
+# ---- in-memory capture state ----
+_capture_state = "stopped"   # "running" | "stopped" | "error"
+_capture_iface = None        # interface name while running
+_capture_error = None        # last error message, if any
+_capture_started = None      # time.time() when capture began
+_state_lock = threading.Lock()
 
-def _extract_features(src_ip):
-    """Compute simple behavioral features for src_ip over the last WINDOW_SECONDS."""
-    now = time.time()
-    with _lock:
-        window = _ip_windows[src_ip]
-        # drop old entries
-        while window and now - window[0]["t"] > WINDOW_SECONDS:
-            window.popleft()
 
-        packet_count = len(window)
-        unique_ports = len(set(e["dport"] for e in window if e["dport"]))
-        syn_count = sum(1 for e in window if e.get("flag") == "S")
-        avg_len = sum(e["len"] for e in window) / packet_count if packet_count else 0
+def get_capture_status():
+    """Return the current capture state dict (used by the /api/status endpoint)."""
+    with _state_lock:
+        if _capture_state == "running":
+            info = {
+                "state": "running",
+                "interface": _capture_iface,
+            }
+            if _capture_started is not None:
+                info["uptime_seconds"] = round(time.time() - _capture_started, 1)
+            return info
+        elif _capture_state == "error":
+            return {
+                "state": "error",
+                "interface": _capture_iface,
+                "error": _capture_error,
+            }
 
-    return {
-        "packet_rate": packet_count / WINDOW_SECONDS,
-        "unique_ports": unique_ports,
-        "syn_rate": syn_count / WINDOW_SECONDS,
-        "avg_packet_len": avg_len,
-    }
+    # Cross-process fallback (e.g. Flask app checking standalone sniffer)
+    return read_capture_status()
 
 
 def _handle_packet(pkt):
-    if IP not in pkt:
+    record = packet_record(pkt)
+    if record is None:
         return
 
-    src_ip = pkt[IP].src
-    dst_ip = pkt[IP].dst
-    length = len(pkt)
-    proto = "OTHER"
-    dport = None
-    flag = None
+    with _extractor_lock:
+        # Avoid dropping packets if network device reports tiny sub-microsecond timestamp jitter
+        if _extractor.last_time is not None and record["timestamp"] < _extractor.last_time:
+            record["timestamp"] = _extractor.last_time
+        try:
+            features = extract_record(_extractor, record)
+        except (ValueError, OverflowError):
+            return
 
-    if TCP in pkt:
-        proto = "TCP"
-        dport = pkt[TCP].dport
-        flags = pkt[TCP].flags
-        if flags == "S":
-            flag = "S"
-    elif UDP in pkt:
-        proto = "UDP"
-        dport = pkt[UDP].dport
-
-    with _lock:
-        _ip_windows[src_ip].append({"t": time.time(), "dport": dport, "flag": flag, "len": length})
-
-    features = _extract_features(src_ip)
     pred = model.predict(features)
-    if isinstance(pred, dict):
-        label = pred.get("label", "normal")
-        confidence = pred.get("probability")
-        if confidence is None:
-            confidence = 0.95 if label != "normal" else 0.5
-        source = pred.get("source", "rule")
-        severity = pred.get("severity", "info")
-        reason = pred.get("reason", "")
-    else:
-        label, confidence = pred
-        source, severity, reason = "ml", "info", ""
-
-    # --- Safety-net rule: catch obvious scans/floods even if model missed them ---
-    if features["unique_ports"] > 15 and label == "normal":
-        label, confidence, severity = "port_scan", 0.95, "medium"
-        reason = f"{features['unique_ports']} destination ports in {WINDOW_SECONDS} seconds"
-    elif features["syn_rate"] > 20 and label == "normal":
-        label, confidence, severity = "syn_flood", 0.95, "high"
-        reason = f"{features['syn_rate']:.1f} initial SYN packets/second"
+    label = pred.get("label", "normal")
+    confidence = pred.get("probability")
+    if confidence is None:
+        confidence = 0.95 if label != "normal" else 0.5
+    source = pred.get("source", "rule")
+    severity = pred.get("severity", "info")
+    reason = pred.get("reason", "")
 
     log_traffic(
-        src_ip, dst_ip, proto, length,
+        record["src_ip"], record["dst_ip"], record["protocol"], record["length"],
         label=label, confidence=confidence,
         source=source, severity=severity, reason=reason, features=features
     )
@@ -118,28 +101,64 @@ def _handle_packet(pkt):
     if label != "normal" and confidence >= CONFIDENCE_THRESHOLD:
         blocked = False
         if AUTO_BLOCK_ENABLED:
-            blocked = block_ip(src_ip)
+            blocked = block_ip(record["src_ip"])
 
         now = time.time()
         with _alert_lock:
-            last_alert = _last_alert_time.get(src_ip, 0)
+            last_alert = _last_alert_time.get(record["src_ip"], 0)
             should_log = (now - last_alert) >= ALERT_COOLDOWN_SECONDS
             if should_log:
-                _last_alert_time[src_ip] = now
+                _last_alert_time[record["src_ip"]] = now
 
         if should_log:
             log_alert(
-                src_ip, label, confidence, blocked=blocked,
+                record["src_ip"], label, confidence, blocked=blocked,
                 source=source, severity=severity, reason=reason, features=features
             )
-            print(f"[ALERT] {src_ip} flagged as '{label}' (confidence={confidence:.2f}) "
+            print(f"[ALERT] {record['src_ip']} flagged as '{label}' (confidence={confidence:.2f}) "
                   f"blocked={blocked} reason={reason}")
 
 
 def start_sniffing(iface=None):
     """Start sniffing in the current thread (blocking). Call from a background thread."""
-    print(f"[sniffer] Starting capture on interface: {iface or 'default'}")
-    sniff(iface=iface, prn=_handle_packet, store=False)
+    global _capture_state, _capture_iface, _capture_error, _capture_started
+
+    chosen_iface = iface or "default"
+    started = time.time()
+    with _state_lock:
+        _capture_state = "running"
+        _capture_iface = chosen_iface
+        _capture_error = None
+        _capture_started = started
+
+    update_capture_status("running", interface=chosen_iface, started_at=started)
+
+    stop_heartbeat = threading.Event()
+
+    def _heartbeat():
+        while not stop_heartbeat.wait(2.0):
+            update_capture_status("running", interface=chosen_iface, started_at=started)
+
+    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+    hb_thread.start()
+
+    print(f"[sniffer] Starting capture on interface: {chosen_iface}")
+    try:
+        sniff(iface=iface, prn=_handle_packet, store=False)
+    except Exception as exc:
+        err_msg = f"{type(exc).__name__}: {exc}"
+        with _state_lock:
+            _capture_state = "error"
+            _capture_error = err_msg
+        update_capture_status("error", interface=chosen_iface, error=err_msg)
+        print(f"[sniffer] Capture error: {err_msg}")
+        raise
+    finally:
+        stop_heartbeat.set()
+        with _state_lock:
+            if _capture_state != "error":
+                _capture_state = "stopped"
+                update_capture_status("stopped", interface=chosen_iface)
 
 
 def start_sniffing_background(iface=None):
