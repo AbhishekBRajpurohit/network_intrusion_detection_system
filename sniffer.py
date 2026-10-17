@@ -7,15 +7,18 @@ SYN count, etc.), and hands off feature vectors to the ML model for
 classification.
 
 Run this directly to test sniffing standalone:
-    sudo python sniffer.py
+    sudo python sniffer.py                    # capture on default interface
+    sudo python sniffer.py --list-interfaces  # show available interfaces
+    sudo python sniffer.py --iface eth0       # capture on a specific interface
 It is normally imported and started from app.py.
 """
 
+import argparse
 import time
 import threading
 from collections import defaultdict, deque
 
-from scapy.all import sniff, IP, TCP, UDP
+from scapy.all import sniff, IP, TCP, UDP, get_if_list, get_if_addr, conf
 
 from utils.logger import log_traffic, log_alert
 from utils.firewall import block_ip
@@ -145,5 +148,63 @@ def start_sniffing_background(iface=None):
     return t
 
 
+def list_interfaces():
+    """Print a table of available network interfaces with their IP addresses."""
+    interfaces = get_if_list()
+    default_iface = getattr(conf, "iface", None)
+
+    # On Windows, scapy's IFACES dict maps raw device names to objects with a
+    # human-readable .name or .description.  Build a lookup so we can display
+    # both the friendly name and the raw device path.
+    friendly = {}
+    try:
+        from scapy.all import IFACES  # type: ignore[attr-defined]
+        for iface_obj in IFACES.values():
+            raw = getattr(iface_obj, "network_name", None)
+            name = getattr(iface_obj, "name", "")
+            desc = getattr(iface_obj, "description", "")
+            display = name or desc or ""
+            if raw and display:
+                friendly[raw] = display
+    except Exception:
+        pass  # non-Windows or older scapy — friendly names simply unavailable
+
+    print(f"\n{'#':<4} {'Interface':<30} {'IP Address':<18} {'Note'}")
+    print("-" * 75)
+    for idx, iface in enumerate(interfaces, 1):
+        try:
+            addr = get_if_addr(iface)
+        except Exception:
+            addr = "(unavailable)"
+        note = "<-- default" if str(iface) == str(default_iface) else ""
+        label = friendly.get(iface, iface)
+        print(f"{idx:<4} {label:<30} {addr:<18} {note}")
+        # If we have a friendly name, also show the raw device path for use with --iface
+        if label != iface:
+            print(f"     ({iface})")
+    print()
+
+
 if __name__ == "__main__":
-    start_sniffing()
+    parser = argparse.ArgumentParser(
+        description="NIDS live packet sniffer — capture and classify network traffic.",
+    )
+    parser.add_argument(
+        "--list-interfaces",
+        action="store_true",
+        help="List available network interfaces and exit.",
+    )
+    parser.add_argument(
+        "--iface",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Network interface to capture on (e.g. eth0, Wi-Fi).  "
+             "Use --list-interfaces to see choices.",
+    )
+    args = parser.parse_args()
+
+    if args.list_interfaces:
+        list_interfaces()
+    else:
+        start_sniffing(iface=args.iface)
