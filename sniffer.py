@@ -22,6 +22,7 @@ from scapy.all import sniff, get_if_list, get_if_addr, conf
 from features import FeatureExtractor, packet_record, extract_record
 from utils.logger import log_traffic, log_alert, update_capture_status, read_capture_status
 from utils.firewall import block_ip
+from utils.notifications import notify_high_severity_async
 from ml_model import NIDSModel
 
 CONFIDENCE_THRESHOLD = 0.85  # auto-block threshold
@@ -117,6 +118,18 @@ def _handle_packet(pkt):
             )
             print(f"[ALERT] {record['src_ip']} flagged as '{label}' (confidence={confidence:.2f}) "
                   f"blocked={blocked} reason={reason}")
+
+            if severity == "high":
+                notify_high_severity_async({
+                    "src_ip": record["src_ip"],
+                    "attack_type": label,
+                    "confidence": confidence,
+                    "severity": severity,
+                    "reason": reason,
+                    "features": features,
+                    "blocked": blocked,
+                    "timestamp": now,
+                })
 
 
 def start_sniffing(iface=None):
