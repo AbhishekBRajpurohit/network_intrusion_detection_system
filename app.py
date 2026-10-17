@@ -70,6 +70,24 @@ def create_app(test_config=None):
         limit=min(100,max(1,int(request.args.get('limit',25))))
         return jsonify(**db.query(table,request.args,limit,(page-1)*limit),page=page,limit=limit)
 
+    @app.get('/api/alerts/<int:alert_id>')
+    def alert_detail(alert_id):
+        alert = db.get_alert(alert_id)
+        if not alert: abort(404, 'Alert not found')
+        return jsonify(alert)
+
+    @app.post('/api/alerts/<int:alert_id>/status')
+    def update_alert_status(alert_id):
+        data = request.get_json(silent=True) or request.form
+        status = data.get('status')
+        if status not in ('New', 'Investigating', 'Resolved'):
+            abort(400, 'Invalid status. Must be New, Investigating, or Resolved')
+        ok = db.update_alert_status(alert_id, status)
+        if not ok: abort(404, 'Alert not found')
+        db.log_audit('update_alert_status', request.remote_addr or '127.0.0.1', success=True,
+                     detail=f"Alert #{alert_id} marked as {status} by {session.get('username')}")
+        return jsonify(success=True, id=alert_id, status=status)
+
     @app.get('/api/stats')
     def stats(): return jsonify(db.stats(request.args))
 
@@ -88,7 +106,7 @@ def create_app(test_config=None):
         if result['total']>100000:abort(400,'Narrow filters to at most 100,000 records')
         out=io.StringIO();writer=csv.writer(out)
         fields=['timestamp','src_ip','dst_ip','protocol', 'label' if table=='traffic' else 'attack_type',
-                'source','severity','confidence','reason','features']
+                'source','severity','confidence',*(['status'] if table=='alerts' else []),'reason','features']
         writer.writerow(fields)
         for row in result['rows']:
             values=[]

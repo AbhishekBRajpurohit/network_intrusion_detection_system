@@ -48,13 +48,66 @@ resizeCanvas();
 
 let lastPacketCount = 0;
 
+function getCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  if (meta && meta.content) return meta.content;
+  const input = document.querySelector('input[name="csrf"]');
+  return input ? input.value : '';
+}
+
 function fmtTime(ts) {
-  return new Date(ts * 1000).toLocaleTimeString();
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' ' + d.toLocaleDateString();
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// State for pagination, filters, and alert cache
+let alertsPage = 1;
+const alertsLimit = 15;
+let alertsTotal = 0;
+const alertsCache = new Map();
+
+let trafficPage = 1;
+const trafficLimit = 15;
+let trafficTotal = 0;
+
+const currentFilters = {
+  ip: '',
+  start_date: '',
+  end_date: '',
+  status: ''
+};
+
+function buildQueryParams(page, limit) {
+  const params = new URLSearchParams();
+  params.set('page', page);
+  params.set('limit', limit);
+  if (currentFilters.ip) params.set('ip', currentFilters.ip);
+  if (currentFilters.start_date) params.set('start_date', currentFilters.start_date);
+  if (currentFilters.end_date) params.set('end_date', currentFilters.end_date);
+  if (currentFilters.status) params.set('status', currentFilters.status);
+  return params.toString();
 }
 
 async function refreshStats() {
   try {
-    const res = await fetch('/api/stats');
+    const params = new URLSearchParams();
+    if (currentFilters.ip) params.set('ip', currentFilters.ip);
+    if (currentFilters.start_date) params.set('start_date', currentFilters.start_date);
+    if (currentFilters.end_date) params.set('end_date', currentFilters.end_date);
+    const qs = params.toString() ? '?' + params.toString() : '';
+
+    const res = await fetch('/api/stats' + qs);
     if (res.status === 401) { window.location.href = '/login'; return; }
     const stats = await res.json();
     document.getElementById('stat-packets').textContent = stats.total_packets ?? stats.traffic ?? 0;
@@ -75,20 +128,53 @@ async function refreshStats() {
 
 async function refreshAlerts() {
   try {
-    const res = await fetch('/api/alerts');
+    const qs = buildQueryParams(alertsPage, alertsLimit);
+    const res = await fetch('/api/alerts?' + qs);
     if (res.status === 401) return;
     const data = await res.json();
-    const alerts = Array.isArray(data) ? data : (data.rows || []);
+    const rows = Array.isArray(data) ? data : (data.rows || []);
+    alertsTotal = data.total ?? rows.length;
+
+    // Cache rows for quick modal access
+    rows.forEach(r => { if (r.id) alertsCache.set(Number(r.id), r); });
+
     const tbody = document.querySelector('#alerts-table tbody');
-    tbody.innerHTML = alerts.map(a => `
-      <tr>
-        <td>${fmtTime(a.timestamp)}</td>
-        <td>${a.src_ip || '—'}</td>
-        <td class="label-attack">${a.attack_type || 'unknown'}</td>
-        <td>${a.confidence != null ? (a.confidence * 100).toFixed(0) + '%' : '—'}</td>
-        <td>${a.blocked ? '✅' : '—'}</td>
-      </tr>
-    `).join('');
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #9aa0ac; padding: 18px;">No alerts match the selected criteria</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(a => {
+        const status = a.status || 'New';
+        const statusClass = `status-${status.toLowerCase()}`;
+        return `
+          <tr data-alert-id="${a.id}">
+            <td>${fmtTime(a.timestamp)}</td>
+            <td><strong>${escapeHtml(a.src_ip || '—')}</strong></td>
+            <td class="label-attack">${escapeHtml(a.attack_type || 'unknown')}</td>
+            <td>${a.confidence != null ? (a.confidence * 100).toFixed(0) + '%' : '—'}</td>
+            <td>
+              <select class="status-dropdown ${statusClass}" data-alert-id="${a.id}" aria-label="Alert Status">
+                <option value="New" ${status === 'New' ? 'selected' : ''}>New</option>
+                <option value="Investigating" ${status === 'Investigating' ? 'selected' : ''}>Investigating</option>
+                <option value="Resolved" ${status === 'Resolved' ? 'selected' : ''}>Resolved</option>
+              </select>
+            </td>
+            <td>
+              <button type="button" class="btn-details" data-alert-id="${a.id}">🔍 Details</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // Update pagination controls
+    const totalPages = Math.max(1, Math.ceil(alertsTotal / alertsLimit));
+    document.getElementById('alerts-page-info').textContent =
+      alertsTotal > 0
+        ? `Showing ${(alertsPage - 1) * alertsLimit + 1}–${Math.min(alertsPage * alertsLimit, alertsTotal)} of ${alertsTotal}`
+        : '0 records';
+    document.getElementById('alerts-current-page').textContent = `Page ${alertsPage} of ${totalPages}`;
+    document.getElementById('alerts-prev').disabled = alertsPage <= 1;
+    document.getElementById('alerts-next').disabled = alertsPage >= totalPages;
   } catch (err) {
     console.error('Error fetching alerts:', err);
   }
@@ -96,20 +182,36 @@ async function refreshAlerts() {
 
 async function refreshTraffic() {
   try {
-    const res = await fetch('/api/traffic');
+    const qs = buildQueryParams(trafficPage, trafficLimit);
+    const res = await fetch('/api/traffic?' + qs);
     if (res.status === 401) return;
     const data = await res.json();
-    const traffic = Array.isArray(data) ? data : (data.rows || []);
+    const rows = Array.isArray(data) ? data : (data.rows || []);
+    trafficTotal = data.total ?? rows.length;
+
     const tbody = document.querySelector('#traffic-table tbody');
-    tbody.innerHTML = traffic.slice(0, 20).map(t => `
-      <tr>
-        <td>${fmtTime(t.timestamp)}</td>
-        <td>${t.src_ip || '—'}</td>
-        <td>${t.dst_ip || '—'}</td>
-        <td>${t.protocol || '—'}</td>
-        <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${t.label || 'normal'}</td>
-      </tr>
-    `).join('');
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #9aa0ac; padding: 18px;">No traffic records match the filters</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(t => `
+        <tr>
+          <td>${fmtTime(t.timestamp)}</td>
+          <td>${escapeHtml(t.src_ip || '—')}</td>
+          <td>${escapeHtml(t.dst_ip || '—')}</td>
+          <td>${escapeHtml(t.protocol || '—')}</td>
+          <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${escapeHtml(t.label || 'normal')}</td>
+        </tr>
+      `).join('');
+    }
+
+    const totalPages = Math.max(1, Math.ceil(trafficTotal / trafficLimit));
+    document.getElementById('traffic-page-info').textContent =
+      trafficTotal > 0
+        ? `Showing ${(trafficPage - 1) * trafficLimit + 1}–${Math.min(trafficPage * trafficLimit, trafficTotal)} of ${trafficTotal}`
+        : '0 records';
+    document.getElementById('traffic-current-page').textContent = `Page ${trafficPage} of ${totalPages}`;
+    document.getElementById('traffic-prev').disabled = trafficPage <= 1;
+    document.getElementById('traffic-next').disabled = trafficPage >= totalPages;
   } catch (err) {
     console.error('Error fetching traffic:', err);
   }
@@ -127,7 +229,7 @@ async function refreshStatus() {
     const label = document.getElementById('capture-label');
 
     const colors = { running: '#5ad1a3', stopped: '#888', error: '#e85d75', unknown: '#f0a500' };
-    dot.style.background = colors[state] || colors.unknown;
+    if (dot) dot.style.background = colors[state] || colors.unknown;
 
     let text = state.charAt(0).toUpperCase() + state.slice(1);
     if (state === 'running' && capture.interface) {
@@ -136,10 +238,206 @@ async function refreshStatus() {
     if (state === 'error' && capture.error) {
       text += `: ${capture.error}`;
     }
-    label.textContent = text;
+    if (label) label.textContent = text;
   } catch (err) {
     console.error('Error fetching status:', err);
   }
+}
+
+async function setAlertStatus(alertId, newStatus) {
+  try {
+    const res = await fetch(`/api/alerts/${alertId}/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken()
+      },
+      body: JSON.stringify({ status: newStatus })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Could not update alert status: ' + (err.error || res.statusText));
+      return false;
+    }
+    // Update cached alert
+    const cached = alertsCache.get(Number(alertId));
+    if (cached) cached.status = newStatus;
+
+    // Update table dropdown styling
+    const select = document.querySelector(`select[data-alert-id="${alertId}"]`);
+    if (select) {
+      select.value = newStatus;
+      select.className = `status-dropdown status-${newStatus.toLowerCase()}`;
+    }
+    return true;
+  } catch (err) {
+    console.error('Error updating alert status:', err);
+    alert('Network error updating status');
+    return false;
+  }
+}
+
+let activeModalAlertId = null;
+
+function showModal(alertData) {
+  if (!alertData) return;
+  activeModalAlertId = alertData.id;
+
+  document.getElementById('modal-title').textContent = `${alertData.attack_type || 'Alert'} (#${alertData.id})`;
+  document.getElementById('modal-reason').textContent = alertData.reason || 'Flagged by detection rule / machine learning threshold.';
+
+  // Feature metrics
+  const feats = alertData.features || {};
+  document.getElementById('m-packet-rate').textContent =
+    feats.packet_rate != null ? Number(feats.packet_rate).toFixed(1) : '—';
+  document.getElementById('m-unique-ports').textContent =
+    feats.unique_ports != null ? feats.unique_ports : '—';
+  document.getElementById('m-syn-rate').textContent =
+    feats.syn_rate != null ? Number(feats.syn_rate).toFixed(1) : '—';
+  document.getElementById('m-avg-len').textContent =
+    feats.avg_packet_len != null ? Math.round(feats.avg_packet_len) : '—';
+
+  // Metadata
+  document.getElementById('m-id').textContent = alertData.id || '—';
+  document.getElementById('m-src-ip').textContent = alertData.src_ip || '—';
+  document.getElementById('m-source').textContent = (alertData.source || 'rule').toUpperCase();
+  document.getElementById('m-severity').textContent = (alertData.severity || 'high').toUpperCase();
+  document.getElementById('m-confidence').textContent =
+    alertData.confidence != null ? (alertData.confidence * 100).toFixed(1) + '%' : '—';
+  document.getElementById('m-blocked').textContent = alertData.blocked ? 'Yes (Firewall Block Rule Added)' : 'No (Alert Only)';
+  document.getElementById('m-time').textContent = fmtTime(alertData.timestamp);
+
+  const statusSel = document.getElementById('modal-status-select');
+  statusSel.value = alertData.status || 'New';
+
+  document.getElementById('alert-modal').style.display = 'flex';
+}
+
+function closeModal() {
+  document.getElementById('alert-modal').style.display = 'none';
+  activeModalAlertId = null;
+}
+
+// Event Listeners Initialization
+function initEventListeners() {
+  // Filter apply & reset
+  const btnApply = document.getElementById('btn-apply-filters');
+  if (btnApply) {
+    btnApply.addEventListener('click', () => {
+      currentFilters.ip = document.getElementById('filter-ip').value.trim();
+      currentFilters.start_date = document.getElementById('filter-start-date').value;
+      currentFilters.end_date = document.getElementById('filter-end-date').value;
+      currentFilters.status = document.getElementById('filter-status').value;
+      alertsPage = 1;
+      trafficPage = 1;
+      refreshAlerts();
+      refreshTraffic();
+      refreshStats();
+    });
+  }
+
+  const btnReset = document.getElementById('btn-reset-filters');
+  if (btnReset) {
+    btnReset.addEventListener('click', () => {
+      document.getElementById('filter-ip').value = '';
+      document.getElementById('filter-start-date').value = '';
+      document.getElementById('filter-end-date').value = '';
+      document.getElementById('filter-status').value = '';
+      currentFilters.ip = '';
+      currentFilters.start_date = '';
+      currentFilters.end_date = '';
+      currentFilters.status = '';
+      alertsPage = 1;
+      trafficPage = 1;
+      refreshAlerts();
+      refreshTraffic();
+      refreshStats();
+    });
+  }
+
+  // Enter key on IP input
+  const ipInput = document.getElementById('filter-ip');
+  if (ipInput) {
+    ipInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        btnApply.click();
+      }
+    });
+  }
+
+  // Alerts table event delegation for Details button & Status dropdown
+  const alertsTable = document.getElementById('alerts-table');
+  if (alertsTable) {
+    alertsTable.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.btn-details');
+      if (btn) {
+        const id = Number(btn.getAttribute('data-alert-id'));
+        let alertData = alertsCache.get(id);
+        if (!alertData) {
+          try {
+            const res = await fetch(`/api/alerts/${id}`);
+            if (res.ok) alertData = await res.json();
+          } catch (err) {
+            console.error('Failed to load alert detail:', err);
+          }
+        }
+        if (alertData) showModal(alertData);
+      }
+    });
+
+    alertsTable.addEventListener('change', async (e) => {
+      if (e.target.classList.contains('status-dropdown')) {
+        const id = Number(e.target.getAttribute('data-alert-id'));
+        const newStatus = e.target.value;
+        await setAlertStatus(id, newStatus);
+      }
+    });
+  }
+
+  // Modal Status change
+  const modalStatusSelect = document.getElementById('modal-status-select');
+  if (modalStatusSelect) {
+    modalStatusSelect.addEventListener('change', async () => {
+      if (activeModalAlertId) {
+        await setAlertStatus(activeModalAlertId, modalStatusSelect.value);
+      }
+    });
+  }
+
+  // Modal Close buttons & backdrop click
+  const modalClose = document.getElementById('modal-close');
+  if (modalClose) modalClose.addEventListener('click', closeModal);
+  const modalBtnClose = document.getElementById('modal-btn-close');
+  if (modalBtnClose) modalBtnClose.addEventListener('click', closeModal);
+
+  const modal = document.getElementById('alert-modal');
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeModal();
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal && modal.style.display !== 'none') {
+      closeModal();
+    }
+  });
+
+  // Pagination buttons
+  document.getElementById('alerts-prev')?.addEventListener('click', () => {
+    if (alertsPage > 1) { alertsPage--; refreshAlerts(); }
+  });
+  document.getElementById('alerts-next')?.addEventListener('click', () => {
+    alertsPage++; refreshAlerts();
+  });
+
+  document.getElementById('traffic-prev')?.addEventListener('click', () => {
+    if (trafficPage > 1) { trafficPage--; refreshTraffic(); }
+  });
+  document.getElementById('traffic-next')?.addEventListener('click', () => {
+    trafficPage++; refreshTraffic();
+  });
 }
 
 function refreshAll() {
@@ -149,5 +447,6 @@ function refreshAll() {
   refreshStatus();
 }
 
+initEventListeners();
 refreshAll();
-setInterval(refreshAll, 2000);
+setInterval(refreshAll, 3000);

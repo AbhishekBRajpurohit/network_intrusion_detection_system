@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="csrf-token" content="{{ session.csrf }}">
   <title>NIDS Live Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
@@ -42,15 +43,59 @@
     <canvas id="trafficChart"></canvas>
   </section>
 
+  <!-- Global Filters (IP Search, Date Range, Status) -->
+  <section class="filter-bar">
+    <div class="filter-group" style="flex: 2;">
+      <label for="filter-ip">🔍 Search IP Address</label>
+      <input type="text" id="filter-ip" placeholder="Filter by source or destination IP...">
+    </div>
+    <div class="filter-group">
+      <label for="filter-start-date">📅 From Date</label>
+      <input type="date" id="filter-start-date">
+    </div>
+    <div class="filter-group">
+      <label for="filter-end-date">📅 To Date</label>
+      <input type="date" id="filter-end-date">
+    </div>
+    <div class="filter-group">
+      <label for="filter-status">🏷️ Alert Status</label>
+      <select id="filter-status">
+        <option value="">All Statuses</option>
+        <option value="New">New</option>
+        <option value="Investigating">Investigating</option>
+        <option value="Resolved">Resolved</option>
+      </select>
+    </div>
+    <div class="filter-actions">
+      <button type="button" id="btn-apply-filters" class="btn-primary">Apply</button>
+      <button type="button" id="btn-reset-filters" class="btn-secondary">Reset</button>
+    </div>
+  </section>
+
   <section class="tables">
     <div class="table-wrap">
       <h2>Recent Alerts</h2>
       <table id="alerts-table">
         <thead>
-          <tr><th>Time</th><th>Source IP</th><th>Attack Type</th><th>Confidence</th><th>Blocked</th></tr>
+          <tr>
+            <th>Time</th>
+            <th>Source IP</th>
+            <th>Attack Type</th>
+            <th>Confidence</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
         </thead>
         <tbody></tbody>
       </table>
+      <div class="table-footer">
+        <span id="alerts-page-info">Showing 0 of 0</span>
+        <div class="pagination-controls">
+          <button type="button" id="alerts-prev" class="btn-page" disabled>&larr; Prev</button>
+          <span id="alerts-current-page" style="font-weight: 600;">1</span>
+          <button type="button" id="alerts-next" class="btn-page" disabled>Next &rarr;</button>
+        </div>
+      </div>
     </div>
 
     <div class="table-wrap">
@@ -61,8 +106,82 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div class="table-footer">
+        <span id="traffic-page-info">Showing 0 of 0</span>
+        <div class="pagination-controls">
+          <button type="button" id="traffic-prev" class="btn-page" disabled>&larr; Prev</button>
+          <span id="traffic-current-page" style="font-weight: 600;">1</span>
+          <button type="button" id="traffic-next" class="btn-page" disabled>Next &rarr;</button>
+        </div>
+      </div>
     </div>
   </section>
+
+  <!-- Alert Details Modal -->
+  <div id="alert-modal" class="modal-backdrop" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>🛡️ <span id="modal-title">Alert Details</span></h2>
+        <button type="button" id="modal-close" class="modal-close-btn" aria-label="Close modal">&times;</button>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Flag Reason & Rationale</div>
+        <div id="modal-reason" class="reason-callout">No specific reason provided</div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Extracted Behavioral Features (5s Window)</div>
+        <div class="metrics-grid">
+          <div class="metric-box">
+            <div id="m-packet-rate" class="metric-val">0</div>
+            <div class="metric-lbl">Packet Rate (/s)</div>
+          </div>
+          <div class="metric-box">
+            <div id="m-unique-ports" class="metric-val">0</div>
+            <div class="metric-lbl">Unique Ports</div>
+          </div>
+          <div class="metric-box">
+            <div id="m-syn-rate" class="metric-val">0</div>
+            <div class="metric-lbl">SYN Rate (/s)</div>
+          </div>
+          <div class="metric-box">
+            <div id="m-avg-len" class="metric-val">0</div>
+            <div class="metric-lbl">Avg Pkt Len (B)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Alert Metadata</div>
+        <table class="info-table">
+          <tbody>
+            <tr><td>Alert ID</td><td id="m-id">—</td></tr>
+            <tr><td>Source IP</td><td id="m-src-ip">—</td></tr>
+            <tr><td>Detection Method</td><td id="m-source">—</td></tr>
+            <tr><td>Severity</td><td id="m-severity">—</td></tr>
+            <tr><td>Confidence</td><td id="m-confidence">—</td></tr>
+            <tr><td>Blocked by Firewall</td><td id="m-blocked">—</td></tr>
+            <tr><td>Timestamp</td><td id="m-time">—</td></tr>
+            <tr>
+              <td>Triage Status</td>
+              <td>
+                <select id="modal-status-select" class="status-dropdown">
+                  <option value="New">New</option>
+                  <option value="Investigating">Investigating</option>
+                  <option value="Resolved">Resolved</option>
+                </select>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;">
+        <button type="button" id="modal-btn-close" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
 
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>
