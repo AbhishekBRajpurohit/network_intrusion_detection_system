@@ -86,12 +86,11 @@ def _handle_packet(pkt):
 
     pred = model.predict(features)
     label = pred.get("label", "normal")
-    confidence = pred.get("probability")
-    if confidence is None:
-        confidence = 0.95 if label != "normal" else 0.5
     source = pred.get("source", "rule")
     severity = pred.get("severity", "info")
     reason = pred.get("reason", "")
+    # Rule detections do not produce probabilities; preserve None for rule matches.
+    confidence = pred.get("probability")
 
     log_traffic(
         record["src_ip"], record["dst_ip"], record["protocol"], record["length"],
@@ -99,7 +98,17 @@ def _handle_packet(pkt):
         source=source, severity=severity, reason=reason, features=features
     )
 
-    if label != "normal" and confidence >= CONFIDENCE_THRESHOLD:
+    is_rule = (source == "rule")
+    should_alert = False
+    if label != "normal":
+        if is_rule:
+            # Deterministic rule triggered
+            should_alert = True
+        elif confidence is not None and confidence >= CONFIDENCE_THRESHOLD:
+            # ML detection met probability threshold
+            should_alert = True
+
+    if should_alert:
         blocked = False
         if AUTO_BLOCK_ENABLED:
             blocked = block_ip(record["src_ip"])
@@ -116,7 +125,8 @@ def _handle_packet(pkt):
                 record["src_ip"], label, confidence, blocked=blocked,
                 source=source, severity=severity, reason=reason, features=features
             )
-            print(f"[ALERT] {record['src_ip']} flagged as '{label}' (confidence={confidence:.2f}) "
+            conf_str = f"confidence={confidence:.2f}" if confidence is not None else "source=rule"
+            print(f"[ALERT] {record['src_ip']} flagged as '{label}' ({conf_str}) "
                   f"blocked={blocked} reason={reason}")
 
             if severity == "high":
@@ -124,6 +134,7 @@ def _handle_packet(pkt):
                     "src_ip": record["src_ip"],
                     "attack_type": label,
                     "confidence": confidence,
+                    "source": source,
                     "severity": severity,
                     "reason": reason,
                     "features": features,

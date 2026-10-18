@@ -145,12 +145,18 @@ async function refreshAlerts() {
       tbody.innerHTML = rows.map(a => {
         const status = a.status || 'New';
         const statusClass = `status-${status.toLowerCase()}`;
+        const isRule = (a.source || '').toLowerCase() === 'rule';
+        const confDisplay = isRule
+          ? '<span class="badge-source badge-rule" title="Deterministic Rule Match">Rule Match</span>'
+          : (a.confidence != null
+              ? `<span class="badge-source badge-ml" title="Machine Learning Probability">${(a.confidence * 100).toFixed(0)}% (ML)</span>`
+              : '—');
         return `
           <tr data-alert-id="${a.id}">
             <td>${fmtTime(a.timestamp)}</td>
             <td><strong>${escapeHtml(a.src_ip || '—')}</strong></td>
             <td class="label-attack">${escapeHtml(a.attack_type || 'unknown')}</td>
-            <td>${a.confidence != null ? (a.confidence * 100).toFixed(0) + '%' : '—'}</td>
+            <td>${confDisplay}</td>
             <td>
               <select class="status-dropdown ${statusClass}" data-alert-id="${a.id}" aria-label="Alert Status">
                 <option value="New" ${status === 'New' ? 'selected' : ''}>New</option>
@@ -298,12 +304,14 @@ function showModal(alertData) {
     feats.avg_packet_len != null ? Math.round(feats.avg_packet_len) : '—';
 
   // Metadata
+  const isRule = (alertData.source || '').toLowerCase() === 'rule';
   document.getElementById('m-id').textContent = alertData.id || '—';
   document.getElementById('m-src-ip').textContent = alertData.src_ip || '—';
-  document.getElementById('m-source').textContent = (alertData.source || 'rule').toUpperCase();
+  document.getElementById('m-source').textContent = isRule ? 'RULE (Deterministic)' : 'MACHINE LEARNING';
   document.getElementById('m-severity').textContent = (alertData.severity || 'high').toUpperCase();
-  document.getElementById('m-confidence').textContent =
-    alertData.confidence != null ? (alertData.confidence * 100).toFixed(1) + '%' : '—';
+  document.getElementById('m-confidence').textContent = isRule
+    ? 'Rule Match (Deterministic threshold, not probabilistic)'
+    : (alertData.confidence != null ? (alertData.confidence * 100).toFixed(1) + '% (ML probability)' : '—');
   document.getElementById('m-blocked').textContent = alertData.blocked ? 'Yes (Firewall Block Rule Added)' : 'No (Alert Only)';
   document.getElementById('m-time').textContent = fmtTime(alertData.timestamp);
 

@@ -68,8 +68,14 @@ def format_alert_email(alert_info: Dict[str, Any]) -> tuple[str, str, str]:
     """Format subject, text body, and HTML body for the alert email."""
     src_ip = alert_info.get("src_ip", "Unknown")
     attack_type = alert_info.get("attack_type", "Intrusion")
+    source = alert_info.get("source")
     confidence = alert_info.get("confidence")
-    conf_str = f"{confidence * 100:.1f}%" if confidence is not None else "N/A"
+    if source == "rule":
+        conf_str = "Rule Match (Deterministic)"
+    elif confidence is not None:
+        conf_str = f"{confidence * 100:.1f}%" + (" (ML)" if source == "ml" else "")
+    else:
+        conf_str = "Rule Match (Deterministic)"
     severity = alert_info.get("severity", "HIGH").upper()
     reason = alert_info.get("reason", "Threshold exceeded")
     blocked = alert_info.get("blocked", False)
