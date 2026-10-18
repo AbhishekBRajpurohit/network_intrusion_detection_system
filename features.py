@@ -47,12 +47,36 @@ def packet_record(pkt):
         return None
     tcp, udp = pkt.getlayer(TCP), pkt.getlayer(UDP)
     transport = tcp if tcp is not None else udp
-    return {'timestamp': float(pkt.time), 'src_ip': layer.src, 'dst_ip': layer.dst,
-            'protocol': 'TCP' if tcp is not None else 'UDP' if udp is not None else 'OTHER',
-            'length': len(pkt), 'dport': int(transport.dport) if transport is not None else None,
-            'syn': bool(tcp is not None and int(tcp.flags) & 2 and not int(tcp.flags) & 16)}
+
+    is_response = False
+    if tcp is not None:
+        flags = int(tcp.flags)
+        # TCP responses or established traffic: ACK set (ACK, PSH-ACK, SYN-ACK, FIN-ACK)
+        # or RST without SYN (reset/rejection response to closed port)
+        if (flags & 0x10) or ((flags & 0x04) and not (flags & 0x02)):
+            is_response = True
+    elif udp is not None:
+        sport = int(udp.sport)
+        dport = int(udp.dport)
+        # UDP responses from server service ports (<1024 or common service ports) to client ephemeral ports
+        if (sport < 1024 or sport in {1900, 5353}) and dport >= 1024:
+            is_response = True
+
+    return {
+        'timestamp': float(pkt.time),
+        'src_ip': layer.src,
+        'dst_ip': layer.dst,
+        'protocol': 'TCP' if tcp is not None else 'UDP' if udp is not None else 'OTHER',
+        'length': len(pkt),
+        'dport': int(transport.dport) if transport is not None else None,
+        'syn': bool(tcp is not None and int(tcp.flags) & 2 and not int(tcp.flags) & 16),
+        'is_response': is_response,
+    }
 
 
 def extract_record(extractor, record):
+    # Only scan attempts are counted towards unique destination ports;
+    # response traffic from gateways/servers destined to client ephemeral ports is excluded.
+    scan_port = record.get('dport') if not record.get('is_response', False) else None
     return extractor.update(record['src_ip'], record['timestamp'], record['length'],
-                            record['dport'], record['syn'])
+                            scan_port, record['syn'])
