@@ -1,132 +1,135 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login - NIDS Dashboard</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-  <style>
-    .login-container {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 80vh;
-    }
-    .login-card {
-      background: #1a1d27;
-      border: 1px solid #2a2e3a;
-      border-radius: 12px;
-      padding: 32px;
-      width: 100%;
-      max-width: 380px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    }
-    .login-card h2 {
-      margin: 0 0 8px;
-      font-size: 20px;
-      color: #e6e6e6;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .login-card p.subtitle {
-      margin: 0 0 24px;
-      color: #9aa0ac;
-      font-size: 13px;
-    }
-    .form-group {
-      margin-bottom: 18px;
-    }
-    .form-group label {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 13px;
-      color: #9aa0ac;
-    }
-    .form-group input {
-      width: 100%;
-      padding: 10px 12px;
-      background: #0f1117;
-      border: 1px solid #2a2e3a;
-      border-radius: 6px;
-      color: #e6e6e6;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    .form-group input:focus {
-      border-color: #5ad1a3;
-    }
-    .btn-submit {
-      width: 100%;
-      padding: 10px;
-      background: #5ad1a3;
-      border: none;
-      border-radius: 6px;
-      color: #0f1117;
-      font-weight: 600;
-      font-size: 14px;
-      cursor: pointer;
-      transition: opacity 0.2s;
-      margin-top: 8px;
-    }
-    .btn-submit:hover {
-      opacity: 0.9;
-    }
-    .alert-error {
-      background: rgba(239, 97, 97, 0.15);
-      border: 1px solid #ef6161;
-      color: #ef6161;
-      padding: 10px 12px;
-      border-radius: 6px;
-      margin-bottom: 18px;
-      font-size: 13px;
-    }
-    .hint {
-      margin-top: 20px;
-      font-size: 12px;
-      color: #6b7280;
-      text-align: center;
-    }
-    .hint code {
-      background: #0f1117;
-      padding: 2px 6px;
-      border-radius: 4px;
-      color: #9aa0ac;
-    }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Sign in · NIDS</title>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css') }}">
 </head>
+
 <body>
-  <div class="login-container">
-    <div class="login-card">
-      <h2>🛡️ NIDS Portal</h2>
-      <p class="subtitle">Sign in to manage and view detection activity</p>
+  <main class="login-layout">
+    <section class="intro" aria-labelledby="intro-title">
+      <a class="brand" href="{{ url_for('login') }}">
+        <span class="brand-icon" aria-hidden="true">N</span>
+        <span>NIDS<span class="brand-dot">.</span></span>
+      </a>
 
-      {% if error %}
-        <div class="alert-error">{{ error }}</div>
-      {% endif %}
+      <div class="intro-content">
+        <p class="eyebrow">NETWORK INTRUSION DETECTION</p>
 
-      <form method="POST" action="{{ url_for('login') }}">
-        <input type="hidden" name="csrf" value="{{ session.csrf }}">
-        
-        <div class="form-group">
-          <label for="username">Username</label>
-          <input type="text" id="username" name="username" required autofocus autocomplete="username">
-        </div>
+        <h1 id="intro-title">
+          Understand your traffic.<br>
+          Investigate your alerts.
+        </h1>
 
-        <div class="form-group">
-          <label for="password">Password</label>
-          <input type="password" id="password" name="password" required autocomplete="current-password">
-        </div>
+        <p class="intro-description">
+          A workspace for monitoring captured network activity,
+          reviewing suspicious patterns, and tracking incidents.
+        </p>
 
-        <button type="submit" class="btn-submit">Sign In</button>
-      </form>
+        <ul class="feature-list">
+          <li>
+            <span class="feature-number">01</span>
+            <div>
+              <h2>Monitor activity</h2>
+              <p>Review traffic captured by your network sensor.</p>
+            </div>
+          </li>
 
-      <div class="hint">
-        Create an account via:<br>
-        <code>flask --app app create-admin</code>
+          <li>
+            <span class="feature-number">02</span>
+            <div>
+              <h2>Understand detections</h2>
+              <p>Inspect alerts and the evidence behind them.</p>
+            </div>
+          </li>
+
+          <li>
+            <span class="feature-number">03</span>
+            <div>
+              <h2>Track investigations</h2>
+              <p>Organize incidents from review to resolution.</p>
+            </div>
+          </li>
+        </ul>
       </div>
-    </div>
-  </div>
+
+      <p class="intro-footer">
+        Monitor only devices and networks you are authorized to inspect.
+      </p>
+    </section>
+
+    <section class="form-panel" aria-labelledby="login-title">
+      <div class="login-card">
+        <p class="eyebrow">YOUR MONITORING WORKSPACE</p>
+        <h2 id="login-title">Welcome back</h2>
+        <p class="form-description">
+          Sign in with your NIDS account to continue.
+        </p>
+
+        {% if error %}
+        <div class="error-message" role="alert">
+          <strong>We couldn’t sign you in.</strong>
+          <span>{{ error }}</span>
+        </div>
+        {% endif %}
+
+        <form id="login-form" method="post" action="{{ url_for('login') }}">
+          <input type="hidden" name="csrf" value="{{ session.csrf }}">
+
+          <div class="form-field">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" value="{{ request.form.get('username', '') }}"
+              placeholder="Enter your username" autocomplete="username" autocapitalize="none" spellcheck="false"
+              required>
+          </div>
+
+          <div class="form-field">
+            <label for="password">Password</label>
+
+            <div class="password-field">
+              <input id="password" name="password" type="password" placeholder="Enter your password"
+                autocomplete="current-password" required>
+
+              <button id="toggle-password" class="password-toggle" type="button" aria-controls="password"
+                aria-label="Show password" aria-pressed="false" hidden>
+                Show
+              </button>
+            </div>
+
+            <p id="caps-warning" class="field-hint" role="status" hidden>
+              Caps Lock is on.
+            </p>
+          </div>
+
+          <button id="submit-button" class="submit-button" type="submit">
+            Sign in
+            <span aria-hidden="true">→</span>
+          </button>
+
+          <p id="login-status" class="field-hint" role="status"></p>
+        </form>
+
+        <div class="account-help">
+          <strong>Need access?</strong>
+          <p>
+            Contact the person managing this NIDS installation.
+            Use your NIDS credentials, not your GitHub password.
+          </p>
+        </div>
+      </div>
+
+      <p class="panel-footer">
+        Network Intrusion Detection System
+      </p>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/login.js') }}" defer></script>
 </body>
+
 </html>
