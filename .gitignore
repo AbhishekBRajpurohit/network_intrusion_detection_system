@@ -9,6 +9,7 @@ __pycache__/
 
 # Dataset (too large for GitHub, and often licensed — don't commit it)
 data/*.csv
+*.db-journal
 
 # Trained model (can be large, and regenerable via train_model.py)
 models/*.pkl
