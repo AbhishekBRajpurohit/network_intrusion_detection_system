@@ -11,6 +11,11 @@
   <header class="dashboard-header">
     <div class="header-brand">
       <h1>🛡️ Real-Time Network Intrusion Detection System</h1>
+      <div class="sync-indicator" id="sync-indicator">
+        <span class="sync-dot live" id="sync-dot"></span>
+        <span id="sync-label">Connected</span>
+        <span class="sync-time" id="sync-time">—</span>
+      </div>
     </div>
     <div class="header-actions">
       <a href="{{ url_for('export_csv', table='traffic') }}" class="btn-action">📥 Export Traffic CSV</a>
@@ -22,6 +27,14 @@
       </form>
     </div>
   </header>
+
+  <div id="connection-banner" class="connection-banner" style="display: none;" role="alert">
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <span class="banner-icon">⚠️</span>
+      <span id="banner-message">Unable to reach the NIDS backend server. Displaying cached data.</span>
+    </div>
+    <button type="button" id="btn-reconnect" class="btn-reconnect">Retry Now</button>
+  </div>
 
   <section class="stats">
     <div class="card">
@@ -96,7 +109,9 @@
             <th>Action</th>
           </tr>
         </thead>
-        <tbody></tbody>
+        <tbody>
+          <tr class="loading-row"><td colspan="6" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading alert records...</td></tr>
+        </tbody>
       </table>
       <div class="table-footer">
         <span id="alerts-page-info">Showing 0 of 0</span>
@@ -114,7 +129,9 @@
         <thead>
           <tr><th>Time</th><th>Src IP</th><th>Dst IP</th><th>Proto</th><th>Label</th></tr>
         </thead>
-        <tbody></tbody>
+        <tbody>
+          <tr class="loading-row"><td colspan="5" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading traffic stream...</td></tr>
+        </tbody>
       </table>
       <div class="table-footer">
         <span id="traffic-page-info">Showing 0 of 0</span>

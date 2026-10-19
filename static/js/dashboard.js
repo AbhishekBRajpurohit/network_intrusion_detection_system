@@ -99,156 +99,193 @@ function buildQueryParams(page, limit) {
   return params.toString();
 }
 
-async function refreshStats() {
-  try {
-    const params = new URLSearchParams();
-    if (currentFilters.ip) params.set('ip', currentFilters.ip);
-    if (currentFilters.start_date) params.set('start_date', currentFilters.start_date);
-    if (currentFilters.end_date) params.set('end_date', currentFilters.end_date);
-    const qs = params.toString() ? '?' + params.toString() : '';
+let lastSuccessfulSync = null;
+let consecutiveErrors = 0;
+let isSyncing = false;
 
-    const res = await fetch('/api/stats' + qs);
-    if (res.status === 401) { window.location.href = '/login'; return; }
-    const stats = await res.json();
-    document.getElementById('stat-packets').textContent = stats.total_packets ?? stats.traffic ?? 0;
-    document.getElementById('stat-alerts').textContent = stats.total_alerts ?? stats.alerts ?? 0;
-    document.getElementById('stat-blocked').textContent = stats.active_blocks ?? 0;
-    document.getElementById('stat-blocked-total').textContent = `${stats.total_blocked ?? 0} historical`;
+function setConnectionState(ok, errorMsg = '') {
+  const banner = document.getElementById('connection-banner');
+  const bannerMsg = document.getElementById('banner-message');
+  const syncDot = document.getElementById('sync-dot');
+  const syncLabel = document.getElementById('sync-label');
 
-    const currentTotal = stats.total_packets ?? stats.traffic ?? 0;
-    const delta = Math.max(currentTotal - lastPacketCount, 0);
-    lastPacketCount = currentTotal;
-
-    trafficData.push(delta);
-    if (trafficData.length > MAX_POINTS) trafficData.shift();
-    drawTrafficChart();
-  } catch (err) {
-    console.error('Error fetching stats:', err);
+  if (ok) {
+    consecutiveErrors = 0;
+    lastSuccessfulSync = Date.now();
+    if (banner) banner.style.display = 'none';
+    if (syncDot) syncDot.className = 'sync-dot live';
+    if (syncLabel) syncLabel.textContent = 'Connected';
+    updateSyncTime();
+  } else {
+    consecutiveErrors++;
+    if (banner) {
+      banner.style.display = 'flex';
+      if (bannerMsg) {
+        bannerMsg.textContent = errorMsg || 'Unable to reach the NIDS backend server. Displaying cached data.';
+      }
+    }
+    if (syncDot) syncDot.className = 'sync-dot error';
+    if (syncLabel) syncLabel.textContent = 'Disconnected';
   }
+}
+
+function updateSyncTime() {
+  const syncTimeEl = document.getElementById('sync-time');
+  if (!syncTimeEl) return;
+  if (!lastSuccessfulSync) {
+    syncTimeEl.textContent = '—';
+    return;
+  }
+  const secAgo = Math.floor((Date.now() - lastSuccessfulSync) / 1000);
+  if (secAgo < 3) {
+    syncTimeEl.textContent = '• synced just now';
+  } else if (secAgo < 60) {
+    syncTimeEl.textContent = `• synced ${secAgo}s ago`;
+  } else {
+    syncTimeEl.textContent = `• synced ${Math.floor(secAgo / 60)}m ago`;
+  }
+}
+
+setInterval(updateSyncTime, 1000);
+
+async function refreshStats() {
+  const params = new URLSearchParams();
+  if (currentFilters.ip) params.set('ip', currentFilters.ip);
+  if (currentFilters.start_date) params.set('start_date', currentFilters.start_date);
+  if (currentFilters.end_date) params.set('end_date', currentFilters.end_date);
+  const qs = params.toString() ? '?' + params.toString() : '';
+
+  const res = await fetch('/api/stats' + qs);
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  if (!res.ok) throw new Error(`Stats endpoint returned HTTP ${res.status}`);
+  const stats = await res.json();
+  document.getElementById('stat-packets').textContent = stats.total_packets ?? stats.traffic ?? 0;
+  document.getElementById('stat-alerts').textContent = stats.total_alerts ?? stats.alerts ?? 0;
+  document.getElementById('stat-blocked').textContent = stats.active_blocks ?? 0;
+  document.getElementById('stat-blocked-total').textContent = `${stats.total_blocked ?? 0} historical`;
+
+  const currentTotal = stats.total_packets ?? stats.traffic ?? 0;
+  const delta = Math.max(currentTotal - lastPacketCount, 0);
+  lastPacketCount = currentTotal;
+
+  trafficData.push(delta);
+  if (trafficData.length > MAX_POINTS) trafficData.shift();
+  drawTrafficChart();
 }
 
 async function refreshAlerts() {
-  try {
-    const qs = buildQueryParams(alertsPage, alertsLimit);
-    const res = await fetch('/api/alerts?' + qs);
-    if (res.status === 401) return;
-    const data = await res.json();
-    const rows = Array.isArray(data) ? data : (data.rows || []);
-    alertsTotal = data.total ?? rows.length;
+  const qs = buildQueryParams(alertsPage, alertsLimit);
+  const res = await fetch('/api/alerts?' + qs);
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  if (!res.ok) throw new Error(`Alerts endpoint returned HTTP ${res.status}`);
+  const data = await res.json();
+  const rows = Array.isArray(data) ? data : (data.rows || []);
+  alertsTotal = data.total ?? rows.length;
 
-    // Cache rows for quick modal access
-    rows.forEach(r => { if (r.id) alertsCache.set(Number(r.id), r); });
+  // Cache rows for quick modal access
+  rows.forEach(r => { if (r.id) alertsCache.set(Number(r.id), r); });
 
-    const tbody = document.querySelector('#alerts-table tbody');
-    if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #9aa0ac; padding: 18px;">No alerts match the selected criteria</td></tr>';
-    } else {
-      tbody.innerHTML = rows.map(a => {
-        const status = a.status || 'New';
-        const statusClass = `status-${status.toLowerCase()}`;
-        const isRule = (a.source || '').toLowerCase() === 'rule';
-        const confDisplay = isRule
-          ? '<span class="badge-source badge-rule" title="Deterministic Rule Match">Rule Match</span>'
-          : (a.confidence != null
-              ? `<span class="badge-source badge-ml" title="Machine Learning Probability">${(a.confidence * 100).toFixed(0)}% (ML)</span>`
-              : '—');
-        return `
-          <tr data-alert-id="${a.id}">
-            <td>${fmtTime(a.timestamp)}</td>
-            <td><strong>${escapeHtml(a.src_ip || '—')}</strong></td>
-            <td class="label-attack">${escapeHtml(a.attack_type || 'unknown')}</td>
-            <td>${confDisplay}</td>
-            <td>
-              <select class="status-dropdown ${statusClass}" data-alert-id="${a.id}" aria-label="Alert Status">
-                <option value="New" ${status === 'New' ? 'selected' : ''}>New</option>
-                <option value="Investigating" ${status === 'Investigating' ? 'selected' : ''}>Investigating</option>
-                <option value="Resolved" ${status === 'Resolved' ? 'selected' : ''}>Resolved</option>
-              </select>
-            </td>
-            <td>
-              <button type="button" class="btn-details" data-alert-id="${a.id}">🔍 Details</button>
-            </td>
-          </tr>
-        `;
-      }).join('');
-    }
-
-    // Update pagination controls
-    const totalPages = Math.max(1, Math.ceil(alertsTotal / alertsLimit));
-    document.getElementById('alerts-page-info').textContent =
-      alertsTotal > 0
-        ? `Showing ${(alertsPage - 1) * alertsLimit + 1}–${Math.min(alertsPage * alertsLimit, alertsTotal)} of ${alertsTotal}`
-        : '0 records';
-    document.getElementById('alerts-current-page').textContent = `Page ${alertsPage} of ${totalPages}`;
-    document.getElementById('alerts-prev').disabled = alertsPage <= 1;
-    document.getElementById('alerts-next').disabled = alertsPage >= totalPages;
-  } catch (err) {
-    console.error('Error fetching alerts:', err);
+  const tbody = document.querySelector('#alerts-table tbody');
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #9aa0ac; padding: 18px;">No alerts match the selected criteria</td></tr>';
+  } else {
+    tbody.innerHTML = rows.map(a => {
+      const status = a.status || 'New';
+      const statusClass = `status-${status.toLowerCase()}`;
+      const isRule = (a.source || '').toLowerCase() === 'rule';
+      const confDisplay = isRule
+        ? '<span class="badge-source badge-rule" title="Deterministic Rule Match">Rule Match</span>'
+        : (a.confidence != null
+            ? `<span class="badge-source badge-ml" title="Machine Learning Probability">${(a.confidence * 100).toFixed(0)}% (ML)</span>`
+            : '—');
+      return `
+        <tr data-alert-id="${a.id}">
+          <td>${fmtTime(a.timestamp)}</td>
+          <td><strong>${escapeHtml(a.src_ip || '—')}</strong></td>
+          <td class="label-attack">${escapeHtml(a.attack_type || 'unknown')}</td>
+          <td>${confDisplay}</td>
+          <td>
+            <select class="status-dropdown ${statusClass}" data-alert-id="${a.id}" aria-label="Alert Status">
+              <option value="New" ${status === 'New' ? 'selected' : ''}>New</option>
+              <option value="Investigating" ${status === 'Investigating' ? 'selected' : ''}>Investigating</option>
+              <option value="Resolved" ${status === 'Resolved' ? 'selected' : ''}>Resolved</option>
+            </select>
+          </td>
+          <td>
+            <button type="button" class="btn-details" data-alert-id="${a.id}">🔍 Details</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
   }
+
+  // Update pagination controls
+  const totalPages = Math.max(1, Math.ceil(alertsTotal / alertsLimit));
+  document.getElementById('alerts-page-info').textContent =
+    alertsTotal > 0
+      ? `Showing ${(alertsPage - 1) * alertsLimit + 1}–${Math.min(alertsPage * alertsLimit, alertsTotal)} of ${alertsTotal}`
+      : '0 records';
+  document.getElementById('alerts-current-page').textContent = `Page ${alertsPage} of ${totalPages}`;
+  document.getElementById('alerts-prev').disabled = alertsPage <= 1;
+  document.getElementById('alerts-next').disabled = alertsPage >= totalPages;
 }
 
 async function refreshTraffic() {
-  try {
-    const qs = buildQueryParams(trafficPage, trafficLimit);
-    const res = await fetch('/api/traffic?' + qs);
-    if (res.status === 401) return;
-    const data = await res.json();
-    const rows = Array.isArray(data) ? data : (data.rows || []);
-    trafficTotal = data.total ?? rows.length;
+  const qs = buildQueryParams(trafficPage, trafficLimit);
+  const res = await fetch('/api/traffic?' + qs);
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  if (!res.ok) throw new Error(`Traffic endpoint returned HTTP ${res.status}`);
+  const data = await res.json();
+  const rows = Array.isArray(data) ? data : (data.rows || []);
+  trafficTotal = data.total ?? rows.length;
 
-    const tbody = document.querySelector('#traffic-table tbody');
-    if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #9aa0ac; padding: 18px;">No traffic records match the filters</td></tr>';
-    } else {
-      tbody.innerHTML = rows.map(t => `
-        <tr>
-          <td>${fmtTime(t.timestamp)}</td>
-          <td>${escapeHtml(t.src_ip || '—')}</td>
-          <td>${escapeHtml(t.dst_ip || '—')}</td>
-          <td>${escapeHtml(t.protocol || '—')}</td>
-          <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${escapeHtml(t.label || 'normal')}</td>
-        </tr>
-      `).join('');
-    }
-
-    const totalPages = Math.max(1, Math.ceil(trafficTotal / trafficLimit));
-    document.getElementById('traffic-page-info').textContent =
-      trafficTotal > 0
-        ? `Showing ${(trafficPage - 1) * trafficLimit + 1}–${Math.min(trafficPage * trafficLimit, trafficTotal)} of ${trafficTotal}`
-        : '0 records';
-    document.getElementById('traffic-current-page').textContent = `Page ${trafficPage} of ${totalPages}`;
-    document.getElementById('traffic-prev').disabled = trafficPage <= 1;
-    document.getElementById('traffic-next').disabled = trafficPage >= totalPages;
-  } catch (err) {
-    console.error('Error fetching traffic:', err);
+  const tbody = document.querySelector('#traffic-table tbody');
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #9aa0ac; padding: 18px;">No traffic records match the filters</td></tr>';
+  } else {
+    tbody.innerHTML = rows.map(t => `
+      <tr>
+        <td>${fmtTime(t.timestamp)}</td>
+        <td>${escapeHtml(t.src_ip || '—')}</td>
+        <td>${escapeHtml(t.dst_ip || '—')}</td>
+        <td>${escapeHtml(t.protocol || '—')}</td>
+        <td class="${t.label === 'normal' ? 'label-normal' : 'label-attack'}">${escapeHtml(t.label || 'normal')}</td>
+      </tr>
+    `).join('');
   }
+
+  const totalPages = Math.max(1, Math.ceil(trafficTotal / trafficLimit));
+  document.getElementById('traffic-page-info').textContent =
+    trafficTotal > 0
+      ? `Showing ${(trafficPage - 1) * trafficLimit + 1}–${Math.min(trafficPage * trafficLimit, trafficTotal)} of ${trafficTotal}`
+      : '0 records';
+  document.getElementById('traffic-current-page').textContent = `Page ${trafficPage} of ${totalPages}`;
+  document.getElementById('traffic-prev').disabled = trafficPage <= 1;
+  document.getElementById('traffic-next').disabled = trafficPage >= totalPages;
 }
 
 async function refreshStatus() {
-  try {
-    const res = await fetch('/api/status');
-    if (res.status === 401) return;
-    const data = await res.json();
-    const capture = data.capture || {};
-    const state = capture.state || data.status || 'unknown';
+  const res = await fetch('/api/status');
+  if (res.status === 401) return;
+  if (!res.ok) throw new Error(`Status endpoint returned HTTP ${res.status}`);
+  const data = await res.json();
+  const capture = data.capture || {};
+  const state = capture.state || data.status || 'unknown';
 
-    const dot = document.getElementById('capture-dot');
-    const label = document.getElementById('capture-label');
+  const dot = document.getElementById('capture-dot');
+  const label = document.getElementById('capture-label');
 
-    const colors = { running: '#5ad1a3', stopped: '#888', error: '#e85d75', unknown: '#f0a500' };
-    if (dot) dot.style.background = colors[state] || colors.unknown;
+  const colors = { running: '#5ad1a3', stopped: '#888', error: '#e85d75', unknown: '#f0a500' };
+  if (dot) dot.style.background = colors[state] || colors.unknown;
 
-    let text = state.charAt(0).toUpperCase() + state.slice(1);
-    if (state === 'running' && capture.interface) {
-      text += ` (${capture.interface})`;
-    }
-    if (state === 'error' && capture.error) {
-      text += `: ${capture.error}`;
-    }
-    if (label) label.textContent = text;
-  } catch (err) {
-    console.error('Error fetching status:', err);
+  let text = state.charAt(0).toUpperCase() + state.slice(1);
+  if (state === 'running' && capture.interface) {
+    text += ` (${capture.interface})`;
   }
+  if (state === 'error' && capture.error) {
+    text += `: ${capture.error}`;
+  }
+  if (label) label.textContent = text;
 }
 
 async function setAlertStatus(alertId, newStatus) {
@@ -447,13 +484,42 @@ function initEventListeners() {
   document.getElementById('traffic-next')?.addEventListener('click', () => {
     trafficPage++; refreshTraffic();
   });
+
+  // Reconnect retry button
+  document.getElementById('btn-reconnect')?.addEventListener('click', () => {
+    refreshAll();
+  });
 }
 
-function refreshAll() {
-  refreshStats();
-  refreshAlerts();
-  refreshTraffic();
-  refreshStatus();
+async function refreshAll() {
+  if (isSyncing) return;
+  isSyncing = true;
+  const syncDot = document.getElementById('sync-dot');
+  if (consecutiveErrors === 0 && syncDot) {
+    syncDot.className = 'sync-dot syncing';
+  }
+
+  try {
+    const results = await Promise.allSettled([
+      refreshStats(),
+      refreshAlerts(),
+      refreshTraffic(),
+      refreshStatus()
+    ]);
+    const anyFailed = results.some(r => r.status === 'rejected');
+    if (anyFailed) {
+      const firstError = results.find(r => r.status === 'rejected')?.reason;
+      console.warn('Dashboard sync issue:', firstError);
+      setConnectionState(false, 'Unable to reach the NIDS backend server. Displaying cached data.');
+    } else {
+      setConnectionState(true);
+    }
+  } catch (err) {
+    console.error('Error refreshing dashboard:', err);
+    setConnectionState(false, 'Connection error: Unable to contact server.');
+  } finally {
+    isSyncing = false;
+  }
 }
 
 initEventListeners();
