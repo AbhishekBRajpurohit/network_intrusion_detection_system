@@ -75,6 +75,20 @@ def _handle_packet(pkt):
     if record is None:
         return
 
+    # Response traffic (ACK, PSH-ACK, SYN-ACK, server UDP replies) is logged
+    # but excluded from threat detection. Counting response packets would inflate
+    # scan-detection metrics (packet_rate, unique_ports, syn_rate) for gateways
+    # and servers that legitimately send high volumes of response traffic.
+    if record.get('is_response', False):
+        log_traffic(
+            record["src_ip"], record["dst_ip"], record["protocol"], record["length"],
+            label="normal", confidence=None,
+            source="skip", severity="info",
+            reason="Response traffic — excluded from scan detection",
+            features={}
+        )
+        return
+
     with _extractor_lock:
         # Avoid dropping packets if network device reports tiny sub-microsecond timestamp jitter
         if _extractor.last_time is not None and record["timestamp"] < _extractor.last_time:
