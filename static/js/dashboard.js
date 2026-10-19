@@ -112,7 +112,8 @@ async function refreshStats() {
     const stats = await res.json();
     document.getElementById('stat-packets').textContent = stats.total_packets ?? stats.traffic ?? 0;
     document.getElementById('stat-alerts').textContent = stats.total_alerts ?? stats.alerts ?? 0;
-    document.getElementById('stat-blocked').textContent = stats.total_blocked ?? 0;
+    document.getElementById('stat-blocked').textContent = stats.active_blocks ?? 0;
+    document.getElementById('stat-blocked-total').textContent = `${stats.total_blocked ?? 0} historical`;
 
     const currentTotal = stats.total_packets ?? stats.traffic ?? 0;
     const delta = Math.max(currentTotal - lastPacketCount, 0);

@@ -89,7 +89,13 @@ def create_app(test_config=None):
         return jsonify(success=True, id=alert_id, status=status)
 
     @app.get('/api/stats')
-    def stats(): return jsonify(db.stats(request.args))
+    def stats():
+        from utils.firewall import get_active_blocks
+        result = db.stats(request.args)
+        active = get_active_blocks()
+        result['active_blocks'] = len(active)
+        result['active_block_list'] = active
+        return jsonify(result)
 
     @app.get('/api/status')
     def status(): return jsonify(db.get_status())

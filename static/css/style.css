@@ -46,6 +46,14 @@ header h1 {
   letter-spacing: 0.05em;
 }
 
+.stat-secondary {
+  margin-top: 6px !important;
+  font-size: 11px !important;
+  color: #6b7280 !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+
 .chart-container {
   background: #1a1d27;
   border: 1px solid #2a2e3a;
