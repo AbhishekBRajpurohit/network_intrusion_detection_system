@@ -2,20 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="csrf-token" content="{{ session.csrf }}">
   <title>NIDS Live Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <header style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-    <h1>🛡️ Real-Time Network Intrusion Detection System</h1>
-    <div style="display: flex; align-items: center; gap: 12px; font-size: 13px;">
-      <a href="{{ url_for('export_csv', table='traffic') }}" style="color: #5ad1a3; text-decoration: none;">📥 Export Traffic CSV</a>
-      <a href="{{ url_for('export_csv', table='alerts') }}" style="color: #5ad1a3; text-decoration: none;">📥 Export Alerts CSV</a>
-      <a href="{{ url_for('pdf') }}" style="color: #5ad1a3; text-decoration: none;">📄 PDF Report</a>
+  <header class="dashboard-header">
+    <div class="header-brand">
+      <h1>🛡️ Real-Time Network Intrusion Detection System</h1>
+    </div>
+    <div class="header-actions">
+      <a href="{{ url_for('export_csv', table='traffic') }}" class="btn-action">📥 Export Traffic CSV</a>
+      <a href="{{ url_for('export_csv', table='alerts') }}" class="btn-action">📥 Export Alerts CSV</a>
+      <a href="{{ url_for('pdf') }}" class="btn-action">📄 PDF Report</a>
       <form method="POST" action="{{ url_for('logout') }}" style="margin: 0;">
         <input type="hidden" name="csrf" value="{{ session.csrf }}">
-        <button type="submit" style="background: #2a2e3a; border: 1px solid #3d4253; color: #e6e6e6; padding: 6px 12px; border-radius: 6px; cursor: pointer;">Sign Out</button>
+        <button type="submit" class="btn-action btn-signout">Sign Out</button>
       </form>
     </div>
   </header>
@@ -41,7 +44,13 @@
   </section>
 
   <section class="chart-container">
-    <canvas id="trafficChart"></canvas>
+    <div class="chart-header">
+      <h2>Live Traffic Activity</h2>
+      <span class="chart-subtitle">Real-time throughput (last 30 seconds)</span>
+    </div>
+    <div class="chart-canvas-wrap">
+      <canvas id="trafficChart"></canvas>
+    </div>
   </section>
 
   <!-- Global Filters (IP Search, Date Range, Status) -->
