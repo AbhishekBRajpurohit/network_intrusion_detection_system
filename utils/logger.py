@@ -307,7 +307,7 @@ def get_status():
     }
 
 
-def log_traffic(src_ip, dst_ip, protocol, length, label="normal", confidence=0.0,
+def log_traffic(src_ip, dst_ip, protocol, length, label="normal", confidence=None,
                 source="rule", severity="info", reason=None, features=None):
     if isinstance(features, dict):
         features = json.dumps(features)
