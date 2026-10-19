@@ -4,6 +4,7 @@ import io
 import json
 import os
 import secrets
+import time
 from datetime import timedelta, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -13,8 +14,60 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from utils import logger as db
 
 
+class LoginRateLimiter:
+    """In-memory rate limiter for login attempts with exponential backoff."""
+    def __init__(self, max_attempts=5, base_lockout=30, window=300):
+        self.max_attempts = max_attempts
+        self.base_lockout = base_lockout
+        self.window = window
+        self._failures = {}  # key -> list of float timestamps
+        self._lockouts = {}  # key -> float (locked until timestamp)
+
+    def _get_key(self, ip, username):
+        clean_ip = (ip or 'unknown').strip()
+        clean_user = (username or '').strip().lower()
+        return f"{clean_ip}:{clean_user}" if clean_user else clean_ip
+
+    def is_rate_limited(self, ip, username):
+        now = time.time()
+        key = self._get_key(ip, username)
+
+        locked_until = self._lockouts.get(key, 0)
+        if locked_until > now:
+            return True, max(1, int(locked_until - now) + 1)
+
+        attempts = [t for t in self._failures.get(key, []) if now - t < self.window]
+        self._failures[key] = attempts
+        return False, 0
+
+    def record_failure(self, ip, username):
+        now = time.time()
+        key = self._get_key(ip, username)
+        attempts = [t for t in self._failures.get(key, []) if now - t < self.window]
+        attempts.append(now)
+        self._failures[key] = attempts
+
+        if len(attempts) >= self.max_attempts:
+            multiplier = 2 ** min(len(attempts) - self.max_attempts, 4)
+            duration = min(self.base_lockout * multiplier, 300)
+            self._lockouts[key] = now + duration
+            return True, int(duration)
+        return False, 0
+
+    def record_success(self, ip, username):
+        key = self._get_key(ip, username)
+        self._failures.pop(key, None)
+        self._lockouts.pop(key, None)
+
+    def reset(self):
+        self._failures.clear()
+        self._lockouts.clear()
+
+
 def create_app(test_config=None):
     app=Flask(__name__)
+    limiter = LoginRateLimiter(max_attempts=5, base_lockout=30, window=300)
+    app.login_limiter = limiter
     app.config.update(SECRET_KEY=os.getenv('NIDS_SECRET_KEY') or secrets.token_hex(32),
         SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Strict',
         SESSION_COOKIE_SECURE=os.getenv('NIDS_HTTPS')=='1',
@@ -48,12 +101,27 @@ def create_app(test_config=None):
         session.setdefault('csrf',secrets.token_hex(32))
         error=None
         if request.method=='POST':
+            ip = request.remote_addr or '127.0.0.1'
+            username = request.form.get('username', '')
+
+            limited, remaining = limiter.is_rate_limited(ip, username)
+            if limited:
+                error = f"Too many failed login attempts. Please wait {remaining} seconds before trying again."
+                return render_template('login.html', error=error), 429
+
             with db.connect() as c:
-                user=c.execute('SELECT * FROM users WHERE username=?',(request.form.get('username',''),)).fetchone()
+                user=c.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
             if user and check_password_hash(user['password_hash'],request.form.get('password','')):
+                limiter.record_success(ip, username)
                 session.clear();session.update(username=user['username'],csrf=secrets.token_hex(32))
                 session.permanent=True
                 return redirect(url_for('index'))
+
+            locked, duration = limiter.record_failure(ip, username)
+            if locked:
+                error = f"Too many failed login attempts. Please wait {duration} seconds before trying again."
+                return render_template('login.html', error=error), 429
+
             error='Incorrect username or password.'
         return render_template('login.html',error=error)
 

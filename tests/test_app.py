@@ -78,6 +78,43 @@ class TestAppEndpoints(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 400)
 
+    def test_login_rate_limiting(self):
+        # Reset limiter state before test
+        if hasattr(self.app, 'login_limiter'):
+            self.app.login_limiter.reset()
+
+        self.client.get("/login")
+        with self.client.session_transaction() as sess:
+            csrf_token = sess["csrf"]
+
+        # 4 failed attempts should yield 200 with incorrect password error
+        for _ in range(4):
+            res = self.client.post("/login", data={
+                "csrf": csrf_token,
+                "username": "badactor",
+                "password": "badpassword"
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertIn(b"Incorrect username or password", res.data)
+
+        # 5th attempt reaches max_attempts limit and returns HTTP 429
+        res5 = self.client.post("/login", data={
+            "csrf": csrf_token,
+            "username": "badactor",
+            "password": "badpassword"
+        })
+        self.assertEqual(res5.status_code, 429)
+        self.assertIn(b"Too many failed login attempts", res5.data)
+
+        # A subsequent attempt while locked out also returns 429
+        res6 = self.client.post("/login", data={
+            "csrf": csrf_token,
+            "username": "badactor",
+            "password": "badpassword"
+        })
+        self.assertEqual(res6.status_code, 429)
+        self.assertIn(b"Too many failed login attempts", res6.data)
+
 
 if __name__ == "__main__":
     unittest.main()
