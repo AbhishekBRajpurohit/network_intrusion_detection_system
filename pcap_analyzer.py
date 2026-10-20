@@ -1,42 +1,76 @@
-"""Offline analysis and labelled feature export. Never sends or blocks anything."""
+
+"""Offline JSONL analysis or ground-truth labelled CSV export."""
 import argparse
 import csv
+import hashlib
+import ipaddress
 import json
 from pathlib import Path
-from scapy.all import PcapReader
-from features import FeatureExtractor, FEATURE_ORDER, packet_record, extract_record, SCHEMA_VERSION, WINDOW_SECONDS
+from scapy.utils import PcapReader
+from features import (FeatureExtractor, FEATURE_ORDER, SCHEMA_VERSION,
+                      WINDOW_SECONDS, LABELS, packet_record, extract_record)
 from ml_model import NIDSModel
 
 
 def process(path, output, label=None, session=None, src=None):
-    if Path(path).resolve()==Path(output).resolve(): raise ValueError('Output must differ from input')
-    extractor=FeatureExtractor()
-    model=None if label is not None else NIDSModel()
-    count=0
-    with PcapReader(str(path)) as reader, open(output,'w',newline='',encoding='utf-8') as f:
-        writer=None
-        if label is not None:
-            writer=csv.DictWriter(f,fieldnames=FEATURE_ORDER+['label','session','schema_version','window_seconds'])
-            writer.writeheader()
-        for pkt in reader:
-            record=packet_record(pkt)
-            if not record: continue
-            features=extract_record(extractor,record)
-            if src and record['src_ip']!=src: continue
-            if writer:
-                writer.writerow({**features,'label':label,'session':session,
-                    'schema_version':SCHEMA_VERSION,'window_seconds':WINDOW_SECONDS})
-            else:
-                f.write(json.dumps({'mode':'offline',**record,'detection':model.predict(features)})+'\n')
-            count+=1
+    path, output = Path(path), Path(output)
+    if path.resolve() == output.resolve():
+        raise ValueError('Output must differ from input')
+    if label is not None and (label not in LABELS or not session or not session.strip()):
+        raise ValueError('CSV export requires a valid label and a nonempty session')
+    if src:
+        src = str(ipaddress.ip_address(src))
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    extractor = FeatureExtractor()
+    model = NIDSModel() if label is None else None
+    count = 0
+    # Exclusive creation prevents accidental replacement of previous exports.
+    with output.open('x', newline='', encoding='utf-8') as stream:
+        try:
+            writer = None
+            if label is not None:
+                writer = csv.DictWriter(stream, fieldnames=FEATURE_ORDER +
+                    ['label', 'session', 'capture_sha256', 'schema_version', 'window_seconds'])
+                writer.writeheader()
+            with PcapReader(str(path)) as reader:
+                for packet in reader:
+                    record = packet_record(packet)
+                    if record is None:
+                        continue
+                    features = extract_record(extractor, record)
+                    if src and str(ipaddress.ip_address(record['src_ip'])) != src:
+                        continue
+                    if writer is not None:
+                        writer.writerow({**features, 'label': label, 'session': session.strip(),
+                            'capture_sha256': digest.hexdigest(),
+                            'schema_version': SCHEMA_VERSION, 'window_seconds': WINDOW_SECONDS})
+                    else:
+                        stream.write(json.dumps({'mode': 'offline', **record,
+                            'detection': model.predict(features)}) + '\n')
+                    count += 1
+            if not count:
+                raise ValueError('No matching IP packets found')
+        except BaseException:
+            stream.close()
+            output.unlink(missing_ok=True)
+            raise
     return count
 
-if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('pcap');p.add_argument('--output',required=True)
-    p.add_argument('--label',choices=['normal','port_scan','syn_flood','other_attack'])
-    p.add_argument('--session',help='Unique capture/session ID. Required with --label.')
-    p.add_argument('--src',help='Only export this source IP (recommended for labelled attacker captures)')
-    a=p.parse_args()
-    if a.label is not None and not a.session: p.error('--session required with --label')
-    print(f"Wrote {process(a.pcap,a.output,a.label,a.session,a.src)} records to {a.output}")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('pcap')
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--label', choices=LABELS)
+    parser.add_argument('--session', help='Same ID for exports from the same capture session')
+    parser.add_argument('--src', help='Only export this source IP')
+    args = parser.parse_args()
+    try:
+        count = process(args.pcap, args.output, args.label, args.session, args.src)
+        print(f'Wrote {count} records to {args.output}')
+    except Exception as exc:
+        parser.exit(1, f'Export failed: {exc}\n')
+
