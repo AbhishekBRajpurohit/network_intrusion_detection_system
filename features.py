@@ -29,7 +29,16 @@ class FeatureExtractor:
         if not isfinite(t) or not isfinite(length) or length < 0:
             raise ValueError('Invalid packet timestamp or length')
         if self.last_time is not None and t < self.last_time:
-            raise ValueError('Packet timestamps must be nondecreasing')
+            backwards = self.last_time - t
+
+            if backwards > 0.1:
+                raise ValueError(
+                    f'Packet timestamp moved backwards by {backwards:.6f}s; '
+                    'maximum tolerated difference is 0.1s'
+                )
+
+            # Treat a small timing difference as the same timestamp.
+            t = self.last_time
         if self.last_cleanup is None or t - self.last_cleanup >= self.window:
             self.cleanup(t)
         if src not in self.windows and len(self.windows) >= self.max_sources:
