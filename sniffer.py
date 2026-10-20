@@ -1,267 +1,172 @@
-"""
-Live packet capture + lightweight feature extraction.
-
-Uses scapy to sniff packets on a network interface, tracks per-source-IP
-behavior over a sliding time window (packet rate, unique ports touched,
-SYN count, etc.), and hands off feature vectors to the ML model for
-classification.
-
-Run this directly to test sniffing standalone:
-    sudo python sniffer.py                    # capture on default interface
-    sudo python sniffer.py --list-interfaces  # show available interfaces
-    sudo python sniffer.py --iface eth0       # capture on a specific interface
-It is normally imported and started from app.py.
-"""
-
+"""Live capture with shared features, visible errors and alert-only detection."""
 import argparse
-import time
 import threading
-
-from scapy.all import sniff, get_if_list, get_if_addr, conf
-
+import time
+from scapy.all import AsyncSniffer, conf, get_if_addr, get_if_list
 from features import FeatureExtractor, packet_record, extract_record
-from utils.logger import log_traffic, log_alert, update_capture_status, read_capture_status
-from utils.firewall import block_ip
-from utils.notifications import notify_high_severity_async
 from ml_model import NIDSModel
+from utils.logger import (init_db, log_traffic, log_alert,
+                          update_capture_status, read_capture_status)
+from utils.notifications import notify_high_severity_async
 
-CONFIDENCE_THRESHOLD = 0.85  # auto-block threshold
-AUTO_BLOCK_ENABLED = True
-ALERT_COOLDOWN_SECONDS = 30  # don't re-alert on the same IP within this window
-
-# Shared feature extractor (replaces the old hand-rolled _ip_windows dict)
+CONFIDENCE_THRESHOLD = .85
+ALERT_COOLDOWN_SECONDS = 30
+_run_lock = threading.Lock()
 _extractor = FeatureExtractor()
-_extractor_lock = threading.Lock()
-
-# tracks the last time each source IP triggered an alert, to avoid flooding
-# the dashboard with a near-duplicate alert on every single packet
 _last_alert_time = {}
-_alert_lock = threading.Lock()
-
-model = NIDSModel()
-
-# ---- in-memory capture state ----
-_capture_state = "stopped"   # "running" | "stopped" | "error"
-_capture_iface = None        # interface name while running
-_capture_error = None        # last error message, if any
-_capture_started = None      # time.time() when capture began
-_state_lock = threading.Lock()
+model = None
 
 
 def get_capture_status():
-    """Return the current capture state dict (used by the /api/status endpoint)."""
-    with _state_lock:
-        if _capture_state == "running":
-            info = {
-                "state": "running",
-                "interface": _capture_iface,
-            }
-            if _capture_started is not None:
-                info["uptime_seconds"] = round(time.time() - _capture_started, 1)
-            return info
-        elif _capture_state == "error":
-            return {
-                "state": "error",
-                "interface": _capture_iface,
-                "error": _capture_error,
-            }
-
-    # Cross-process fallback (e.g. Flask app checking standalone sniffer)
     return read_capture_status()
 
 
-def _handle_packet(pkt):
-    record = packet_record(pkt)
+def _handle_packet(packet):
+    record = packet_record(packet)
     if record is None:
         return
-
-    # Response traffic (ACK, PSH-ACK, SYN-ACK, server UDP replies) is logged
-    # but excluded from threat detection. Counting response packets would inflate
-    # scan-detection metrics (packet_rate, unique_ports, syn_rate) for gateways
-    # and servers that legitimately send high volumes of response traffic.
-    if record.get('is_response', False):
-        log_traffic(
-            record["src_ip"], record["dst_ip"], record["protocol"], record["length"],
-            label="normal", confidence=None,
-            source="skip", severity="info",
-            reason="Response traffic — excluded from scan detection",
-            features={}
-        )
+    # Use exactly the same feature extraction as offline analysis.
+    features = extract_record(_extractor, record)
+    prediction = model.predict(features)
+    label = prediction['label']
+    confidence = prediction['probability']
+    source = prediction['source']
+    severity = prediction['severity']
+    reason = prediction['reason']
+    log_traffic(record['src_ip'], record['dst_ip'], record['protocol'], record['length'],
+        label=label, confidence=confidence, source=source, severity=severity,
+        reason=reason, features=features)
+    now = time.monotonic()
+    for key, when in list(_last_alert_time.items()):
+        if now - when >= ALERT_COOLDOWN_SECONDS:
+            del _last_alert_time[key]
+    should_alert = label != 'normal' and (source == 'rule' or
+        (confidence is not None and confidence >= CONFIDENCE_THRESHOLD))
+    key = (record['src_ip'], label, source)
+    if not should_alert or key in _last_alert_time:
         return
-
-    with _extractor_lock:
-        # Avoid dropping packets if network device reports tiny sub-microsecond timestamp jitter
-        if _extractor.last_time is not None and record["timestamp"] < _extractor.last_time:
-            record["timestamp"] = _extractor.last_time
+    log_alert(record['src_ip'], label, confidence, blocked=False,
+        source=source, severity=severity, reason=reason, features=features)
+    _last_alert_time[key] = now
+    print(f"[ALERT] {record['src_ip']} {label}: {reason}")
+    if severity == 'high':
         try:
-            features = extract_record(_extractor, record)
-        except (ValueError, OverflowError):
-            return
-
-    pred = model.predict(features)
-    label = pred.get("label", "normal")
-    source = pred.get("source", "rule")
-    severity = pred.get("severity", "info")
-    reason = pred.get("reason", "")
-    # Rule detections do not produce probabilities; preserve None for rule matches.
-    confidence = pred.get("probability")
-
-    log_traffic(
-        record["src_ip"], record["dst_ip"], record["protocol"], record["length"],
-        label=label, confidence=confidence,
-        source=source, severity=severity, reason=reason, features=features
-    )
-
-    is_rule = (source == "rule")
-    should_alert = False
-    if label != "normal":
-        if is_rule:
-            # Deterministic rule triggered
-            should_alert = True
-        elif confidence is not None and confidence >= CONFIDENCE_THRESHOLD:
-            # ML detection met probability threshold
-            should_alert = True
-
-    if should_alert:
-        blocked = False
-        if AUTO_BLOCK_ENABLED:
-            blocked = block_ip(record["src_ip"])
-
-        now = time.time()
-        with _alert_lock:
-            last_alert = _last_alert_time.get(record["src_ip"], 0)
-            should_log = (now - last_alert) >= ALERT_COOLDOWN_SECONDS
-            if should_log:
-                _last_alert_time[record["src_ip"]] = now
-
-        if should_log:
-            log_alert(
-                record["src_ip"], label, confidence, blocked=blocked,
-                source=source, severity=severity, reason=reason, features=features
-            )
-            conf_str = f"confidence={confidence:.2f}" if confidence is not None else "source=rule"
-            print(f"[ALERT] {record['src_ip']} flagged as '{label}' ({conf_str}) "
-                  f"blocked={blocked} reason={reason}")
-
-            if severity == "high":
-                notify_high_severity_async({
-                    "src_ip": record["src_ip"],
-                    "attack_type": label,
-                    "confidence": confidence,
-                    "source": source,
-                    "severity": severity,
-                    "reason": reason,
-                    "features": features,
-                    "blocked": blocked,
-                    "timestamp": now,
-                })
+            notify_high_severity_async({
+                'src_ip': record['src_ip'], 'attack_type': label,
+                'confidence': confidence, 'source': source, 'severity': severity,
+                'reason': reason, 'features': features, 'blocked': False,
+                'timestamp': time.time(),
+            })
+        except Exception as exc:
+            print(f'[notifications] Could not queue notification: {exc}')
 
 
 def start_sniffing(iface=None):
-    """Start sniffing in the current thread (blocking). Call from a background thread."""
-    global _capture_state, _capture_iface, _capture_error, _capture_started
-
-    chosen_iface = iface or "default"
+    global model, _extractor
+    if not _run_lock.acquire(blocking=False):
+        raise RuntimeError('Capture is already running in this process')
+    worker = None
+    error = None
+    callback_errors = []
+    ready = threading.Event()
+    cancelled = threading.Event()
+    interface = str(iface or conf.iface)
     started = time.time()
-    with _state_lock:
-        _capture_state = "running"
-        _capture_iface = chosen_iface
-        _capture_error = None
-        _capture_started = started
 
-    update_capture_status("running", interface=chosen_iface, started_at=started)
+    def handle(packet):
+        # Scapy can swallow callback exceptions. Preserve them for the main loop.
+        if callback_errors or cancelled.is_set():
+            return
+        try:
+            _handle_packet(packet)
+        except Exception as exc:
+            callback_errors.append(exc)
 
-    stop_heartbeat = threading.Event()
+    def on_started():
+        ready.set()
+        if cancelled.is_set():
+            worker.stop(join=False)
 
-    def _heartbeat():
-        while not stop_heartbeat.wait(2.0):
-            update_capture_status("running", interface=chosen_iface, started_at=started)
-
-    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-    hb_thread.start()
-
-    print(f"[sniffer] Starting capture on interface: {chosen_iface}")
     try:
-        sniff(iface=iface, prn=_handle_packet, store=False)
+        init_db()
+        model = NIDSModel()
+        _extractor = FeatureExtractor()
+        _last_alert_time.clear()
+        update_capture_status('stopped', interface=interface)
+        worker = AsyncSniffer(iface=iface, prn=handle, store=False,
+                              started_callback=on_started)
+        worker.start()
+        deadline = time.monotonic() + 15
+        while not ready.wait(.1):
+            if worker.exception:
+                raise worker.exception
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Capture interface did not become ready')
+        print(f'[sniffer] Capturing on {interface}; alert-only mode')
+        print(f'[sniffer] {model.status}')
+        next_heartbeat = 0
+        while True:
+            if callback_errors:
+                raise callback_errors[0]
+            if worker.exception:
+                raise worker.exception
+            if not worker.running:
+                raise RuntimeError('Capture worker stopped unexpectedly')
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                update_capture_status('running', interface=interface, started_at=started)
+                next_heartbeat = now + 2
+            time.sleep(.1)
+    except KeyboardInterrupt:
+        print('\n[sniffer] Stopping capture')
     except Exception as exc:
-        err_msg = f"{type(exc).__name__}: {exc}"
-        with _state_lock:
-            _capture_state = "error"
-            _capture_error = err_msg
-        update_capture_status("error", interface=chosen_iface, error=err_msg)
-        print(f"[sniffer] Capture error: {err_msg}")
+        error = f'{type(exc).__name__}: {exc}'
+        print(f'[sniffer] Capture error: {error}')
         raise
     finally:
-        stop_heartbeat.set()
-        with _state_lock:
-            if _capture_state != "error":
-                _capture_state = "stopped"
-                update_capture_status("stopped", interface=chosen_iface)
+        cancelled.set()
+        try:
+            if worker is not None and worker.running and ready.is_set():
+                worker.stop()
+        except Exception as exc:
+            error = error or f'Capture shutdown failed: {exc}'
+        try:
+            update_capture_status('error' if error else 'stopped',
+                                  interface=interface, error=error)
+        except Exception as exc:
+            print(f'[sniffer] Could not save final status: {exc}')
+        finally:
+            _run_lock.release()
 
 
 def start_sniffing_background(iface=None):
-    t = threading.Thread(target=start_sniffing, args=(iface,), daemon=True)
-    t.start()
-    return t
+    thread = threading.Thread(target=start_sniffing, args=(iface,), daemon=True)
+    thread.start()
+    return thread
 
 
 def list_interfaces():
-    """Print a table of available network interfaces with their IP addresses."""
-    interfaces = get_if_list()
-    default_iface = getattr(conf, "iface", None)
-
-    # On Windows, scapy's IFACES dict maps raw device names to objects with a
-    # human-readable .name or .description.  Build a lookup so we can display
-    # both the friendly name and the raw device path.
-    friendly = {}
-    try:
-        from scapy.all import IFACES  # type: ignore[attr-defined]
-        for iface_obj in IFACES.values():
-            raw = getattr(iface_obj, "network_name", None)
-            name = getattr(iface_obj, "name", "")
-            desc = getattr(iface_obj, "description", "")
-            display = name or desc or ""
-            if raw and display:
-                friendly[raw] = display
-    except Exception:
-        pass  # non-Windows or older scapy — friendly names simply unavailable
-
-    print(f"\n{'#':<4} {'Interface':<30} {'IP Address':<18} {'Note'}")
-    print("-" * 75)
-    for idx, iface in enumerate(interfaces, 1):
+    for number, interface in enumerate(get_if_list(), 1):
         try:
-            addr = get_if_addr(iface)
+            address = get_if_addr(interface)
         except Exception:
-            addr = "(unavailable)"
-        note = "<-- default" if str(iface) == str(default_iface) else ""
-        label = friendly.get(iface, iface)
-        print(f"{idx:<4} {label:<30} {addr:<18} {note}")
-        # If we have a friendly name, also show the raw device path for use with --iface
-        if label != iface:
-            print(f"     ({iface})")
-    print()
+            address = 'unavailable'
+        try:
+            name = conf.ifaces.dev_from_networkname(interface).name
+        except Exception:
+            name = str(interface)
+        print(f'{number}. {name}  {address}\n   {interface}')
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="NIDS live packet sniffer — capture and classify network traffic.",
-    )
-    parser.add_argument(
-        "--list-interfaces",
-        action="store_true",
-        help="List available network interfaces and exit.",
-    )
-    parser.add_argument(
-        "--iface",
-        type=str,
-        default=None,
-        metavar="NAME",
-        help="Network interface to capture on (e.g. eth0, Wi-Fi).  "
-             "Use --list-interfaces to see choices.",
-    )
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--list-interfaces', action='store_true')
+    parser.add_argument('--iface')
     args = parser.parse_args()
-
     if args.list_interfaces:
         list_interfaces()
     else:
-        start_sniffing(iface=args.iface)
+        try:
+            start_sniffing(args.iface)
+        except Exception:
+            raise SystemExit(1)
