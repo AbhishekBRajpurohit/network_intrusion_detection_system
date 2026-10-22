@@ -1,65 +1,139 @@
 "use strict";
 
-const form = document.getElementById("login-form");
-const password = document.getElementById("password");
-const toggle = document.getElementById("toggle-password");
-const capsWarning = document.getElementById("caps-warning");
-const submitButton = document.getElementById("submit-button");
-const statusMessage = document.getElementById("login-status");
+(() => {
+  const form = document.getElementById("login-form");
+  const password = document.getElementById("password");
+  const toggle = document.getElementById("toggle-password");
+  const caps = document.getElementById("caps-warning");
+  const submit = document.getElementById("submit-button");
+  const status = document.getElementById("login-status");
+  const label = document.getElementById("submit-label");
+  const connection = document.getElementById("connection-warning");
+  const error = document.getElementById("login-error");
 
-toggle.hidden = false;
+  if (!form || !password || !toggle || !caps || !submit || !status) {
+    return;
+  }
 
-toggle.addEventListener("click", () => {
-  const showPassword = password.type === "password";
+  let submitting = false;
+  let resetTimer;
 
-  password.type = showPassword ? "text" : "password";
-  toggle.textContent = showPassword ? "Hide" : "Show";
-  toggle.setAttribute(
-    "aria-label",
-    showPassword ? "Hide password" : "Show password"
-  );
-  toggle.setAttribute("aria-pressed", String(showPassword));
-});
+  toggle.hidden = false;
 
-function updateCapsWarning(event) {
-  capsWarning.hidden = !event.getModifierState("CapsLock");
-}
+  function hidePassword() {
+    password.type = "password";
+    toggle.textContent = "Show";
+    toggle.setAttribute("aria-label", "Show password");
+    toggle.setAttribute("aria-pressed", "false");
+  }
 
-password.addEventListener("keydown", updateCapsWarning);
-password.addEventListener("keyup", updateCapsWarning);
+  function resetSubmission() {
+    window.clearTimeout(resetTimer);
 
-password.addEventListener("blur", () => {
-  capsWarning.hidden = true;
-});
+    submitting = false;
+    submit.disabled = false;
+    form.removeAttribute("aria-busy");
 
-let resetTimer;
+    if (label) {
+      label.textContent = "Sign in";
+    }
 
-function resetSubmission() {
-  clearTimeout(resetTimer);
-  submitButton.disabled = false;
-  form.removeAttribute("aria-busy");
-  statusMessage.textContent = "";
-}
+    status.textContent = "";
+  }
 
-form.addEventListener("submit", () => {
-  submitButton.disabled = true;
-  form.setAttribute("aria-busy", "true");
-  statusMessage.textContent = "Signing you in…";
+  function updateConnection() {
+    // Offline status does not mean localhost is unreachable.
+    if (connection) {
+      connection.hidden = navigator.onLine !== false;
+    }
+  }
 
-  // Allow another attempt if navigation stalls.
-  resetTimer = setTimeout(() => {
+  toggle.addEventListener("click", () => {
+    const show = password.type === "password";
+
+    password.type = show ? "text" : "password";
+    toggle.textContent = show ? "Hide" : "Show";
+
+    toggle.setAttribute(
+      "aria-label",
+      show ? "Hide password" : "Show password"
+    );
+
+    toggle.setAttribute("aria-pressed", String(show));
+  });
+
+  function checkCaps(event) {
+    caps.hidden = !(
+      typeof event.getModifierState === "function" &&
+      event.getModifierState("CapsLock")
+    );
+  }
+
+  password.addEventListener("keydown", checkCaps);
+  password.addEventListener("keyup", checkCaps);
+
+  password.addEventListener("blur", () => {
+    caps.hidden = true;
+  });
+
+  form.addEventListener("submit", (event) => {
+    if (submitting) {
+      event.preventDefault();
+      return;
+    }
+
+    if (!form.checkValidity()) {
+      event.preventDefault();
+      form.reportValidity();
+      return;
+    }
+
+    submitting = true;
+
+    hidePassword();
+    caps.hidden = true;
+    submit.disabled = true;
+    form.setAttribute("aria-busy", "true");
+
+    if (label) {
+      label.textContent = "Signing in…";
+    }
+
+    status.textContent = "Checking your credentials…";
+
+    resetTimer = window.setTimeout(() => {
+      resetSubmission();
+
+      status.textContent =
+        "Still waiting. Check that the NIDS server is running before retrying.";
+    }, 15000);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      hidePassword();
+      caps.hidden = true;
+    }
+  });
+
+  window.addEventListener("pagehide", () => {
+    window.clearTimeout(resetTimer);
+    hidePassword();
+  });
+
+  window.addEventListener("pageshow", () => {
     resetSubmission();
-    statusMessage.textContent =
-      "Still waiting. Check your connection before trying again.";
-  }, 15000);
-});
+    hidePassword();
+    caps.hidden = true;
+    updateConnection();
 
-window.addEventListener("pageshow", () => {
-  resetSubmission();
+    if (error) {
+      error.focus();
+    }
+  });
 
-  password.type = "password";
-  toggle.textContent = "Show";
-  toggle.setAttribute("aria-label", "Show password");
-  toggle.setAttribute("aria-pressed", "false");
-  capsWarning.hidden = true;
-});
+  window.addEventListener("online", updateConnection);
+  window.addEventListener("offline", updateConnection);
+
+  updateConnection();
+})();
