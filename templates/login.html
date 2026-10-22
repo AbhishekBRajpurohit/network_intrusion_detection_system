@@ -4,16 +4,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
 
   <title>Sign in · NIDS</title>
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css') }}">
+
+  <script src="{{ url_for('static', filename='js/login.js') }}" defer></script>
 </head>
 
 <body>
+  <a class="skip-link" href="#username">Skip to sign in</a>
+
   <main class="login-layout">
     <section class="intro" aria-labelledby="intro-title">
-      <a class="brand" href="{{ url_for('login') }}">
+      <a class="brand" href="{{ url_for('login') }}" aria-label="NIDS sign in">
         <span class="brand-icon" aria-hidden="true">N</span>
         <span>NIDS<span class="brand-dot">.</span></span>
       </a>
@@ -22,13 +27,13 @@
         <p class="eyebrow">NETWORK INTRUSION DETECTION</p>
 
         <h1 id="intro-title">
-          Understand your traffic.<br>
-          Investigate your alerts.
+          Know your traffic.<br>
+          Understand your alerts.
         </h1>
 
         <p class="intro-description">
-          A workspace for monitoring captured network activity,
-          reviewing suspicious patterns, and tracking incidents.
+          Review captured network activity and follow each investigation
+          from the first alert to resolution.
         </p>
 
         <ul class="feature-list">
@@ -36,64 +41,71 @@
             <span class="feature-number">01</span>
             <div>
               <h2>Monitor activity</h2>
-              <p>Review traffic captured by your network sensor.</p>
+              <p>Explore traffic captured by your network sensor.</p>
             </div>
           </li>
 
           <li>
             <span class="feature-number">02</span>
             <div>
-              <h2>Understand detections</h2>
-              <p>Inspect alerts and the evidence behind them.</p>
+              <h2>Inspect the evidence</h2>
+              <p>See the reasons and features behind a detection.</p>
             </div>
           </li>
 
           <li>
             <span class="feature-number">03</span>
             <div>
-              <h2>Track investigations</h2>
-              <p>Organize incidents from review to resolution.</p>
+              <h2>Follow the investigation</h2>
+              <p>Track incidents from New to Investigating to Resolved.</p>
             </div>
           </li>
         </ul>
       </div>
 
-      <p class="intro-footer">
-        Monitor only devices and networks you are authorized to inspect.
-      </p>
+      <p class="intro-footer">Your network monitoring workspace</p>
     </section>
 
     <section class="form-panel" aria-labelledby="login-title">
       <div class="login-card">
-        <p class="eyebrow">YOUR MONITORING WORKSPACE</p>
+        <p class="eyebrow">ACCOUNT ACCESS</p>
+
         <h2 id="login-title">Welcome back</h2>
-        <p class="form-description">
-          Sign in with your NIDS account to continue.
-        </p>
+        <p class="form-description">Sign in to your NIDS workspace.</p>
 
         {% if error %}
-        <div class="error-message" role="alert">
-          <strong>We couldn’t sign you in.</strong>
+        <div id="login-error" class="error-message" role="alert" tabindex="-1">
+          <strong>Unable to sign in</strong>
           <span>{{ error }}</span>
         </div>
         {% endif %}
+
+        <p id="connection-warning" class="connection-warning" role="status" hidden>
+          Your browser reports that it is offline.
+          A local NIDS server may still be reachable.
+        </p>
 
         <form id="login-form" method="post" action="{{ url_for('login') }}">
           <input type="hidden" name="csrf" value="{{ session.csrf }}">
 
           <div class="form-field">
             <label for="username">Username</label>
-            <input id="username" name="username" type="text" value="{{ request.form.get('username', '') }}"
-              placeholder="Enter your username" autocomplete="username" autocapitalize="none" spellcheck="false"
-              required>
+
+            <input id="username" name="username" type="text" required value="{{ request.form.get('username', '') }}"
+              autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Enter your username"
+              aria-describedby="username-hint">
+
+            <p id="username-hint" class="field-hint">
+              Use the username created for this installation.
+            </p>
           </div>
 
           <div class="form-field">
             <label for="password">Password</label>
 
             <div class="password-field">
-              <input id="password" name="password" type="password" placeholder="Enter your password"
-                autocomplete="current-password" required>
+              <input id="password" name="password" type="password" required autocomplete="current-password"
+                placeholder="Enter your password" aria-describedby="caps-warning">
 
               <button id="toggle-password" class="password-toggle" type="button" aria-controls="password"
                 aria-label="Show password" aria-pressed="false" hidden>
@@ -107,29 +119,38 @@
           </div>
 
           <button id="submit-button" class="submit-button" type="submit">
-            Sign in
-            <span aria-hidden="true">→</span>
+            <span id="submit-label">Sign in</span>
+            <span class="submit-arrow" aria-hidden="true">→</span>
           </button>
 
-          <p id="login-status" class="field-hint" role="status"></p>
+          <p id="login-status" class="field-hint" role="status" aria-atomic="true"></p>
         </form>
 
-        <div class="account-help">
-          <strong>Need access?</strong>
+        <details class="account-help">
+          <summary>Need help signing in?</summary>
+
           <p>
-            Contact the person managing this NIDS installation.
-            Use your NIDS credentials, not your GitHub password.
+            Use your NIDS account credentials.
+            Your GitHub account is separate.
           </p>
-        </div>
+
+          <p>
+            If you need an account or have forgotten your password,
+            contact the person managing this installation.
+          </p>
+        </details>
+
+        <noscript>
+          <p class="field-hint">
+            You can sign in without JavaScript.
+            Password visibility controls require JavaScript.
+          </p>
+        </noscript>
       </div>
 
-      <p class="panel-footer">
-        Network Intrusion Detection System
-      </p>
+      <p class="panel-footer">Network Intrusion Detection System</p>
     </section>
   </main>
-
-  <script src="{{ url_for('static', filename='js/login.js') }}" defer></script>
 </body>
 
 </html>
