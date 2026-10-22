@@ -1,119 +1,275 @@
+"""Dashboard and authentication tests using a temporary SQLite database."""
+
+import tempfile
 import unittest
-import json
-from app import create_app
+from pathlib import Path
+from unittest.mock import patch
+
+from werkzeug.security import generate_password_hash
 from utils import logger as db
 
 
 class TestAppEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.password = "Nids-test-password-2026!"
+        cls.password_hash = generate_password_hash(cls.password)
+
     def setUp(self):
-        self.app = create_app({"TESTING": True})
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+
+        database = str(Path(temporary.name) / "test.sqlite3")
+
+        database_patch = patch.object(db, "DB_PATH", database)
+        database_patch.start()
+        self.addCleanup(database_patch.stop)
+
+        # app.py creates an app during import.
+        # Patch the database BEFORE importing it.
+        from app import create_app
+
+        self.app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "test-only-session-secret",
+            "SESSION_COOKIE_SECURE": False,
+        })
+
         self.client = self.app.test_client()
 
+        with db.connect() as connection:
+            connection.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                ("admin", self.password_hash),
+            )
+
+    def csrf_token(self):
+        self.client.get("/login")
+
+        with self.client.session_transaction() as session:
+            return session["csrf"]
+
+    def authenticate(self):
+        with self.client.session_transaction() as session:
+            session["username"] = "admin"
+            session["csrf"] = "test-csrf-token"
+
+    def create_alert(self):
+        db.log_alert(
+            "192.0.2.10",
+            "port_scan",
+            None,
+            blocked=False,
+            source="rule",
+            severity="medium",
+            reason="Synthetic test incident",
+            status="New",
+        )
+
+        with db.connect() as connection:
+            return connection.execute(
+                "SELECT id FROM alerts ORDER BY id DESC LIMIT 1"
+            ).fetchone()["id"]
+
     def test_unauthenticated_redirects_to_login(self):
-        res = self.client.get("/")
-        self.assertEqual(res.status_code, 302)
-        self.assertIn("/login", res.headers.get("Location", ""))
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response.headers["Location"])
 
     def test_unauthenticated_api_returns_401(self):
-        res = self.client.get("/api/alerts")
-        self.assertEqual(res.status_code, 401)
+        response = self.client.get("/api/alerts")
+
+        self.assertEqual(response.status_code, 401)
 
     def test_authenticated_alerts_and_pagination(self):
-        with self.client.session_transaction() as sess:
-            sess["username"] = "admin"
-            sess["csrf"] = "token123"
+        for _ in range(3):
+            self.create_alert()
 
-        res = self.client.get("/api/alerts?page=1&limit=5")
-        self.assertEqual(res.status_code, 200)
-        data = res.get_json()
-        self.assertIn("rows", data)
-        self.assertIn("total", data)
-        self.assertEqual(data["page"], 1)
-        self.assertEqual(data["limit"], 5)
+        self.authenticate()
+
+        response = self.client.get("/api/alerts?page=2&limit=2")
+
+        self.assertEqual(response.status_code, 200)
+
+        data = response.get_json()
+
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(len(data["rows"]), 1)
+        self.assertEqual(data["page"], 2)
+        self.assertEqual(data["limit"], 2)
 
     def test_alert_status_triage_flow(self):
-        # Insert a dummy alert to test status transitions
-        db.log_alert("192.168.99.99", "port_scan", 0.95, blocked=False,
-                     source="rule", severity="medium", reason="Test scan",
-                     status="New")
-        with db.connect() as conn:
-            row = conn.execute("SELECT id FROM alerts WHERE src_ip = '192.168.99.99' ORDER BY id DESC LIMIT 1").fetchone()
-            aid = row["id"]
+        alert_id = self.create_alert()
+        self.authenticate()
 
-        with self.client.session_transaction() as sess:
-            sess["username"] = "admin"
-            sess["csrf"] = "token123"
+        for status in ("Investigating", "Resolved"):
+            response = self.client.post(
+                f"/api/alerts/{alert_id}/status",
+                headers={"X-CSRF-Token": "test-csrf-token"},
+                json={"status": status},
+            )
 
-        # Update to Investigating
-        res = self.client.post(
-            f"/api/alerts/{aid}/status",
-            headers={"X-CSRF-Token": "token123"},
-            json={"status": "Investigating"}
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.get_json()["status"], "Investigating")
-
-        # Verify in database
-        alert = db.get_alert(aid)
-        self.assertEqual(alert["status"], "Investigating")
-
-        # Update to Resolved
-        res2 = self.client.post(
-            f"/api/alerts/{aid}/status",
-            headers={"X-CSRF-Token": "token123"},
-            json={"status": "Resolved"}
-        )
-        self.assertEqual(res2.status_code, 200)
-        self.assertEqual(db.get_alert(aid)["status"], "Resolved")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(db.get_alert(alert_id)["status"], status)
 
     def test_csrf_failure_on_post(self):
-        with self.client.session_transaction() as sess:
-            sess["username"] = "admin"
-            sess["csrf"] = "correct_token"
+        alert_id = self.create_alert()
+        self.authenticate()
 
-        res = self.client.post(
-            "/api/alerts/1/status",
-            headers={"X-CSRF-Token": "wrong_token"},
-            json={"status": "Resolved"}
+        response = self.client.post(
+            f"/api/alerts/{alert_id}/status",
+            headers={"X-CSRF-Token": "incorrect-token"},
+            json={"status": "Resolved"},
         )
-        self.assertEqual(res.status_code, 400)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(db.get_alert(alert_id)["status"], "New")
+
+    def test_invalid_alert_status_does_not_change_record(self):
+        alert_id = self.create_alert()
+        self.authenticate()
+
+        response = self.client.post(
+            f"/api/alerts/{alert_id}/status",
+            headers={"X-CSRF-Token": "test-csrf-token"},
+            json={"status": "Deleted"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(db.get_alert(alert_id)["status"], "New")
+
+    def test_login_page_contains_csrf_and_accessible_fields(self):
+        response = self.client.get("/login")
+
+        self.assertEqual(response.status_code, 200)
+
+        for markup in (
+            b'name="csrf"',
+            b'for="username"',
+            b'for="password"',
+            b'autocomplete="current-password"',
+            b'class="skip-link"',
+        ):
+            self.assertIn(markup, response.data)
+
+    def test_login_without_csrf_is_rejected(self):
+        self.client.get("/login")
+
+        response = self.client.post(
+            "/login",
+            data={
+                "username": "admin",
+                "password": self.password,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+        with self.client.session_transaction() as session:
+            self.assertNotIn("username", session)
+
+    def test_successful_login_rotates_csrf_token(self):
+        original_token = self.csrf_token()
+
+        response = self.client.post(
+            "/login",
+            data={
+                "csrf": original_token,
+                "username": "admin",
+                "password": self.password,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["username"], "admin")
+            self.assertNotEqual(session["csrf"], original_token)
+
+        self.assertEqual(
+            self.client.get("/api/alerts").status_code,
+            200,
+        )
+
+    def test_failed_login_never_echoes_password(self):
+        password = "wrong-private-password"
+
+        response = self.client.post(
+            "/login",
+            data={
+                "csrf": self.csrf_token(),
+                "username": "admin",
+                "password": password,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        self.assertIn(
+            b"Incorrect username or password",
+            response.data,
+        )
+
+        self.assertNotIn(password.encode(), response.data)
+
+        with self.client.session_transaction() as session:
+            self.assertNotIn("username", session)
 
     def test_login_rate_limiting(self):
-        # Reset limiter state before test
-        if hasattr(self.app, 'login_limiter'):
-            self.app.login_limiter.reset()
+        token = self.csrf_token()
 
-        self.client.get("/login")
-        with self.client.session_transaction() as sess:
-            csrf_token = sess["csrf"]
+        for attempt in range(6):
+            response = self.client.post(
+                "/login",
+                data={
+                    "csrf": token,
+                    "username": "unknown-user",
+                    "password": "incorrect-password",
+                },
+            )
 
-        # 4 failed attempts should yield 200 with incorrect password error
-        for _ in range(4):
-            res = self.client.post("/login", data={
-                "csrf": csrf_token,
-                "username": "badactor",
-                "password": "badpassword"
-            })
-            self.assertEqual(res.status_code, 200)
-            self.assertIn(b"Incorrect username or password", res.data)
+            expected = 200 if attempt < 4 else 429
+            self.assertEqual(response.status_code, expected)
 
-        # 5th attempt reaches max_attempts limit and returns HTTP 429
-        res5 = self.client.post("/login", data={
-            "csrf": csrf_token,
-            "username": "badactor",
-            "password": "badpassword"
-        })
-        self.assertEqual(res5.status_code, 429)
-        self.assertIn(b"Too many failed login attempts", res5.data)
+        self.assertIn(
+            b"Too many failed login attempts",
+            response.data,
+        )
 
-        # A subsequent attempt while locked out also returns 429
-        res6 = self.client.post("/login", data={
-            "csrf": csrf_token,
-            "username": "badactor",
-            "password": "badpassword"
-        })
-        self.assertEqual(res6.status_code, 429)
-        self.assertIn(b"Too many failed login attempts", res6.data)
+    def test_logout_removes_authenticated_session(self):
+        self.authenticate()
+
+        response = self.client.post(
+            "/logout",
+            data={"csrf": "test-csrf-token"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.assertEqual(
+            self.client.get("/api/alerts").status_code,
+            401,
+        )
+
+    def test_login_response_has_security_headers(self):
+        response = self.client.get("/login")
+
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            "no-store",
+        )
+
+        self.assertEqual(
+            response.headers["X-Frame-Options"],
+            "DENY",
+        )
+
+        self.assertIn(
+            "form-action 'self'",
+            response.headers["Content-Security-Policy"],
+        )
 
 
 if __name__ == "__main__":
