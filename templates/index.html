@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
   <title>NIDS Live Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
+
 <body>
   <header class="dashboard-header">
     <div class="header-brand">
@@ -48,10 +50,13 @@
     <div class="card">
       <h3><span id="stat-blocked">0</span></h3>
       <p>Active Blocks</p>
-      <p class="stat-secondary" id="stat-blocked-total" title="Total alerts that triggered a block action (including expired)">0 historical</p>
+      <p class="stat-secondary" id="stat-blocked-total"
+        title="Total alerts that triggered a block action (including expired)">0 historical</p>
     </div>
     <div class="card">
-      <h3 id="stat-capture"><span id="capture-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#888;margin-right:6px;vertical-align:middle;"></span><span id="capture-label">—</span></h3>
+      <h3 id="stat-capture"><span id="capture-dot"
+          style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#888;margin-right:6px;vertical-align:middle;"></span><span
+          id="capture-label">—</span></h3>
       <p>Capture Status</p>
     </div>
   </section>
@@ -110,7 +115,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr class="loading-row"><td colspan="6" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading alert records...</td></tr>
+          <tr class="loading-row">
+            <td colspan="6" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading alert records...</td>
+          </tr>
         </tbody>
       </table>
       <div class="table-footer">
@@ -127,10 +134,18 @@
       <h2>Recent Traffic</h2>
       <table id="traffic-table">
         <thead>
-          <tr><th>Time</th><th>Src IP</th><th>Dst IP</th><th>Proto</th><th>Label</th></tr>
+          <tr>
+            <th>Time</th>
+            <th>Src IP</th>
+            <th>Dst IP</th>
+            <th>Proto</th>
+            <th>Label</th>
+          </tr>
         </thead>
         <tbody>
-          <tr class="loading-row"><td colspan="5" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading traffic stream...</td></tr>
+          <tr class="loading-row">
+            <td colspan="5" style="text-align: center; color: #64748b; padding: 18px;">⏳ Loading traffic stream...</td>
+          </tr>
         </tbody>
       </table>
       <div class="table-footer">
@@ -183,13 +198,34 @@
         <div class="modal-section-title">Alert Metadata</div>
         <table class="info-table">
           <tbody>
-            <tr><td>Alert ID</td><td id="m-id">—</td></tr>
-            <tr><td>Source IP</td><td id="m-src-ip">—</td></tr>
-            <tr><td>Detection Method</td><td id="m-source">—</td></tr>
-            <tr><td>Severity</td><td id="m-severity">—</td></tr>
-            <tr><td>Confidence</td><td id="m-confidence">—</td></tr>
-            <tr><td>Blocked by Firewall</td><td id="m-blocked">—</td></tr>
-            <tr><td>Timestamp</td><td id="m-time">—</td></tr>
+            <tr>
+              <td>Alert ID</td>
+              <td id="m-id">—</td>
+            </tr>
+            <tr>
+              <td>Source IP</td>
+              <td id="m-src-ip">—</td>
+            </tr>
+            <tr>
+              <td>Detection Method</td>
+              <td id="m-source">—</td>
+            </tr>
+            <tr>
+              <td>Severity</td>
+              <td id="m-severity">—</td>
+            </tr>
+            <tr>
+              <td>Confidence</td>
+              <td id="m-confidence">—</td>
+            </tr>
+            <tr>
+              <td>Blocked by Firewall</td>
+              <td id="m-blocked">—</td>
+            </tr>
+            <tr>
+              <td>Timestamp</td>
+              <td id="m-time">—</td>
+            </tr>
             <tr>
               <td>Triage Status</td>
               <td>
@@ -212,4 +248,5 @@
 
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>
+
 </html>
