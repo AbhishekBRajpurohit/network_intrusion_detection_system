@@ -1,6 +1,6 @@
-"""Shared packet features for live capture and PCAP analysis."""
+"""Shared packet features with incremental sliding-window statistics."""
 
-from collections import defaultdict, deque
+from collections import Counter, deque
 from math import isfinite
 
 FEATURE_ORDER = [
@@ -30,18 +30,28 @@ class FeatureExtractor:
         max_sources=10000,
         max_packets=20000,
     ):
-        if (
-            not isfinite(window)
-            or window <= 0
-            or min(max_sources, max_packets) < 1
-        ):
-            raise ValueError("Window and capacity limits must be positive")
+        if not isfinite(window) or window <= 0:
+            raise ValueError("Window must be positive and finite")
+
+        for value in (max_sources, max_packets):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError(
+                    "Capacity limits must be positive integers"
+                )
 
         self.window = window
         self.max_sources = max_sources
         self.max_packets = max_packets
 
-        self.windows = defaultdict(deque)
+        self.windows = {}
+        self._lengths = {}
+        self._syns = {}
+        self._ports = {}
+
         self.last_time = None
         self.last_cleanup = None
         self.timestamp_corrections = 0
@@ -55,8 +65,32 @@ class FeatureExtractor:
                 or timestamp - packets[-1][0] >= self.window
             ):
                 del self.windows[source]
+                del self._lengths[source]
+                del self._syns[source]
+                del self._ports[source]
 
         self.last_cleanup = timestamp
+
+    def _expire(self, source, timestamp):
+        packets = self.windows[source]
+        ports = self._ports[source]
+
+        while packets and timestamp - packets[0][0] >= self.window:
+            _, length, port, syn = packets.popleft()
+
+            self._lengths[source] -= length
+            self._syns[source] -= syn
+
+            if port is not None:
+                ports[port] -= 1
+
+                if ports[port] == 0:
+                    del ports[port]
+
+        if not packets:
+            self._lengths[source] = 0.0
+            self._syns[source] = 0
+            ports.clear()
 
     def update(self, src, timestamp, length, dport=None, syn=False):
         timestamp = float(timestamp)
@@ -76,9 +110,9 @@ class FeatureExtractor:
 
             if difference > TIMESTAMP_TOLERANCE_SECONDS:
                 raise ValueError(
-                    f"Packet timestamp moved backwards by {difference:.6f}s; "
-                    f"maximum tolerated difference is "
-                    f"{TIMESTAMP_TOLERANCE_SECONDS}s"
+                    f"Packet timestamp moved backwards by "
+                    f"{difference:.6f}s; maximum tolerated difference "
+                    f"is {TIMESTAMP_TOLERANCE_SECONDS}s"
                 )
 
             timestamp = self.last_time
@@ -90,33 +124,47 @@ class FeatureExtractor:
         ):
             self.cleanup(timestamp)
 
-        if src not in self.windows and len(self.windows) >= self.max_sources:
-            raise OverflowError("Source tracking capacity exceeded")
+        if src not in self.windows:
+            if len(self.windows) >= self.max_sources:
+                self.cleanup(timestamp)
 
+            if len(self.windows) >= self.max_sources:
+                raise OverflowError(
+                    "Source tracking capacity exceeded"
+                )
+
+            self.windows[src] = deque()
+            self._lengths[src] = 0.0
+            self._syns[src] = 0
+            self._ports[src] = Counter()
+
+        self._expire(src, timestamp)
         packets = self.windows[src]
 
-        while packets and timestamp - packets[0][0] >= self.window:
-            packets.popleft()
-
         if len(packets) >= self.max_packets:
-            raise OverflowError("Per-source packet capacity exceeded")
+            raise OverflowError(
+                "Per-source packet capacity exceeded"
+            )
 
-        packets.append((timestamp, length, dport, bool(syn)))
+        syn = bool(syn)
+
+        packets.append((timestamp, length, dport, syn))
+
+        self._lengths[src] += length
+        self._syns[src] += syn
+
+        if dport is not None:
+            self._ports[src][dport] += 1
+
         self.last_time = timestamp
-
-        if corrected:
-            self.timestamp_corrections += 1
+        self.timestamp_corrections += int(corrected)
 
         return {
             "packet_rate": len(packets) / self.window,
-            "unique_ports": len({
-                packet[2]
-                for packet in packets
-                if packet[2] is not None
-            }),
-            "syn_rate": sum(packet[3] for packet in packets) / self.window,
+            "unique_ports": len(self._ports[src]),
+            "syn_rate": self._syns[src] / self.window,
             "avg_packet_len": (
-                sum(packet[1] for packet in packets) / len(packets)
+                self._lengths[src] / len(packets)
             ),
         }
 
@@ -139,8 +187,8 @@ def packet_record(packet):
 
     flags = int(tcp.flags) if tcp is not None else 0
 
-    # This heuristic excludes likely response ports from port diversity.
-    # It does not declare response-like packets safe.
+    # Exclude likely response ports from port diversity.
+    # Response-like packets are still measured and classified.
     response = bool(
         flags & 16 or (flags & 4 and not flags & 2)
     )
@@ -160,7 +208,11 @@ def packet_record(packet):
             else "OTHER"
         ),
         "length": len(packet),
-        "dport": int(transport.dport) if transport is not None else None,
+        "dport": (
+            int(transport.dport)
+            if transport is not None
+            else None
+        ),
         "syn": bool(flags & 2 and not flags & 16),
         "is_response": response,
     }
