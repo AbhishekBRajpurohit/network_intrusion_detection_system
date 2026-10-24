@@ -46,7 +46,9 @@ function drawTrafficChart() {
 window.addEventListener('resize', () => { resizeCanvas(); drawTrafficChart(); });
 resizeCanvas();
 
-let lastPacketCount = 0;
+// The first response establishes a baseline; historical rows are not new traffic.
+let lastPacketCount = null;
+let chartFilterKey = null;
 
 function getCsrfToken() {
   const meta = document.querySelector('meta[name="csrf-token"]');
@@ -102,6 +104,7 @@ function buildQueryParams(page, limit) {
 let lastSuccessfulSync = null;
 let consecutiveErrors = 0;
 let isSyncing = false;
+let refreshQueued = false;
 
 function setConnectionState(ok, errorMsg = '') {
   const banner = document.getElementById('connection-banner');
@@ -153,8 +156,10 @@ async function refreshStats() {
   if (currentFilters.ip) params.set('ip', currentFilters.ip);
   if (currentFilters.start_date) params.set('start_date', currentFilters.start_date);
   if (currentFilters.end_date) params.set('end_date', currentFilters.end_date);
+  if (currentFilters.status) params.set('status', currentFilters.status);
   const qs = params.toString() ? '?' + params.toString() : '';
 
+  const requestFilterKey = qs;
   const res = await fetch('/api/stats' + qs);
   if (res.status === 401) { window.location.href = '/login'; return; }
   if (!res.ok) throw new Error(`Stats endpoint returned HTTP ${res.status}`);
@@ -165,7 +170,13 @@ async function refreshStats() {
   document.getElementById('stat-blocked-total').textContent = `${stats.total_blocked ?? 0} historical`;
 
   const currentTotal = stats.total_packets ?? stats.traffic ?? 0;
-  const delta = Math.max(currentTotal - lastPacketCount, 0);
+  if (chartFilterKey !== requestFilterKey ||
+    lastPacketCount === null || currentTotal < lastPacketCount) {
+    trafficData.length = 0;
+    lastPacketCount = null;
+    chartFilterKey = requestFilterKey;
+  }
+  const delta = lastPacketCount === null ? 0 : currentTotal - lastPacketCount;
   lastPacketCount = currentTotal;
 
   trafficData.push(delta);
@@ -182,7 +193,8 @@ async function refreshAlerts() {
   const rows = Array.isArray(data) ? data : (data.rows || []);
   alertsTotal = data.total ?? rows.length;
 
-  // Cache rows for quick modal access
+  // Keep only the current page so long-running sessions have a bounded cache.
+  alertsCache.clear();
   rows.forEach(r => { if (r.id) alertsCache.set(Number(r.id), r); });
 
   const tbody = document.querySelector('#alerts-table tbody');
@@ -196,8 +208,8 @@ async function refreshAlerts() {
       const confDisplay = isRule
         ? '<span class="badge-source badge-rule" title="Deterministic Rule Match">Rule Match</span>'
         : (a.confidence != null
-            ? `<span class="badge-source badge-ml" title="Machine Learning Probability">${(a.confidence * 100).toFixed(0)}% (ML)</span>`
-            : '—');
+          ? `<span class="badge-source badge-ml" title="Machine Learning Probability">${(a.confidence * 100).toFixed(0)}% (ML)</span>`
+          : '—');
       return `
         <tr data-alert-id="${a.id}">
           <td>${fmtTime(a.timestamp)}</td>
@@ -376,9 +388,7 @@ function initEventListeners() {
       currentFilters.status = document.getElementById('filter-status').value;
       alertsPage = 1;
       trafficPage = 1;
-      refreshAlerts();
-      refreshTraffic();
-      refreshStats();
+      refreshAll();
     });
   }
 
@@ -395,9 +405,7 @@ function initEventListeners() {
       currentFilters.status = '';
       alertsPage = 1;
       trafficPage = 1;
-      refreshAlerts();
-      refreshTraffic();
-      refreshStats();
+      refreshAll();
     });
   }
 
@@ -472,17 +480,17 @@ function initEventListeners() {
 
   // Pagination buttons
   document.getElementById('alerts-prev')?.addEventListener('click', () => {
-    if (alertsPage > 1) { alertsPage--; refreshAlerts(); }
+    if (alertsPage > 1) { alertsPage--; refreshAll(); }
   });
   document.getElementById('alerts-next')?.addEventListener('click', () => {
-    alertsPage++; refreshAlerts();
+    alertsPage++; refreshAll();
   });
 
   document.getElementById('traffic-prev')?.addEventListener('click', () => {
-    if (trafficPage > 1) { trafficPage--; refreshTraffic(); }
+    if (trafficPage > 1) { trafficPage--; refreshAll(); }
   });
   document.getElementById('traffic-next')?.addEventListener('click', () => {
-    trafficPage++; refreshTraffic();
+    trafficPage++; refreshAll();
   });
 
   // Reconnect retry button
@@ -492,7 +500,7 @@ function initEventListeners() {
 }
 
 async function refreshAll() {
-  if (isSyncing) return;
+  if (isSyncing) { refreshQueued = true; return; }
   isSyncing = true;
   const syncDot = document.getElementById('sync-dot');
   if (consecutiveErrors === 0 && syncDot) {
@@ -510,7 +518,7 @@ async function refreshAll() {
     if (anyFailed) {
       const firstError = results.find(r => r.status === 'rejected')?.reason;
       console.warn('Dashboard sync issue:', firstError);
-      setConnectionState(false, 'Unable to reach the NIDS backend server. Displaying cached data.');
+      setConnectionState(false, firstError?.message || 'Refresh failed. Displaying cached data.');
     } else {
       setConnectionState(true);
     }
@@ -519,6 +527,10 @@ async function refreshAll() {
     setConnectionState(false, 'Connection error: Unable to contact server.');
   } finally {
     isSyncing = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      void refreshAll();
+    }
   }
 }
 
