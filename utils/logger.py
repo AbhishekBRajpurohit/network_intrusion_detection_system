@@ -5,6 +5,7 @@ import os
 import time
 import json
 import contextlib
+import math
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "nids.db")
 
@@ -90,6 +91,10 @@ def init_db():
     # Ensure any older rows without status are initialized to 'New'
     c.execute("UPDATE alerts SET status = 'New' WHERE status IS NULL OR status = ''")
 
+    # Index common date and incident-status filters without changing stored data.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON traffic(timestamp)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status_id ON alerts(status, id)")
     conn.commit()
     conn.close()
 
@@ -176,26 +181,30 @@ def connect():
 
 
 def _parse_date(val, is_end=False):
-    if not val:
+    if val is None or val == "":
         return None
     try:
-        return float(val)
+        numeric = float(val)
     except (ValueError, TypeError):
         pass
+    else:
+        if not math.isfinite(numeric):
+            raise ValueError("Date filters must be finite timestamps")
+        return numeric
     from datetime import datetime, timezone
     s = str(val).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(s, fmt)
             if fmt == "%Y-%m-%d" and is_end:
-                dt = dt.replace(hour=23, minute=59, second=59)
+                dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
             return dt.replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
             continue
-    return None
+    raise ValueError("Invalid date filter. Use YYYY-MM-DD, a UTC date/time, or a Unix timestamp")
 
 
-def query(table, args=None, limit=25, offset=0):
+def _where(table, args=None):
     if table not in ("traffic", "alerts"):
         raise ValueError(f"Invalid table: {table}")
 
@@ -214,7 +223,7 @@ def query(table, args=None, limit=25, offset=0):
             clauses.append("src_ip LIKE ?")
             params.append(ip_val)
 
-    if args.get("protocol"):
+    if table == "traffic" and args.get("protocol"):
         clauses.append("protocol = ?")
         params.append(args["protocol"])
     if args.get("severity"):
@@ -241,8 +250,14 @@ def query(table, args=None, limit=25, offset=0):
         clauses.append("timestamp <= ?")
         params.append(end_ts)
 
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        raise ValueError("Start date must be before or equal to end date")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
 
+
+def query(table, args=None, limit=25, offset=0):
+    where, params = _where(table, args)
     with connect() as conn:
         c = conn.cursor()
         c.execute(f"SELECT COUNT(*) FROM {table} {where}", params)
@@ -266,20 +281,28 @@ def query(table, args=None, limit=25, offset=0):
 
 
 def stats(args=None):
+    """Apply the same filters as the tables and exported incident reports.
+
+    Status/attack type apply only to alerts; protocol/label only to traffic.
+    IP and UTC date filters apply to both.
+    """
+    traffic_where, traffic_params = _where("traffic", args)
+    alert_where, alert_params = _where("alerts", args)
+    blocked_where = alert_where + (" AND" if alert_where else "WHERE") + " blocked = 1"
     with connect() as conn:
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM traffic")
-        total_traffic = c.fetchone()[0]
-
-        c.execute("SELECT COUNT(*) FROM alerts")
-        total_alerts = c.fetchone()[0]
-
-        c.execute("SELECT COUNT(*) FROM alerts WHERE blocked = 1")
-        total_blocked = c.fetchone()[0]
-
-        c.execute("SELECT attack_type, COUNT(*) as cnt FROM alerts GROUP BY attack_type ORDER BY cnt DESC")
-        attacks = [{"attack_type": r["attack_type"], "count": r["cnt"]} for r in c.fetchall()]
-
+        total_traffic = conn.execute(
+            f"SELECT COUNT(*) FROM traffic {traffic_where}", traffic_params
+        ).fetchone()[0]
+        total_alerts = conn.execute(
+            f"SELECT COUNT(*) FROM alerts {alert_where}", alert_params
+        ).fetchone()[0]
+        total_blocked = conn.execute(
+            f"SELECT COUNT(*) FROM alerts {blocked_where}", alert_params
+        ).fetchone()[0]
+        attacks = [dict(row) for row in conn.execute(
+            f"SELECT attack_type, COUNT(*) AS count FROM alerts {alert_where} "
+            "GROUP BY attack_type ORDER BY count DESC, attack_type", alert_params
+        )]
     return {
         "traffic": total_traffic,
         "alerts": total_alerts,
