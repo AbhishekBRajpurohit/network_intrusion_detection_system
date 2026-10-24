@@ -271,6 +271,83 @@ class TestAppEndpoints(unittest.TestCase):
             response.headers["Content-Security-Policy"],
         )
 
+    def seed_filter_records(self):
+        with db.connect() as connection:
+            connection.executemany(
+                "INSERT INTO traffic(timestamp,src_ip,dst_ip,protocol,label) VALUES(?,?,?,?,?)",
+                [(100, "192.0.2.10", "198.51.100.1", "TCP", "normal"),
+                 (200, "192.0.2.20", "198.51.100.2", "UDP", "normal"),
+                 (300, "192.0.2.10", "198.51.100.3", "TCP", "port_scan")],
+            )
+            connection.executemany(
+                "INSERT INTO alerts(timestamp,src_ip,attack_type,blocked,status) VALUES(?,?,?,?,?)",
+                [(100, "192.0.2.10", "port_scan", 0, "New"),
+                 (200, "192.0.2.20", "syn_flood", 1, "Resolved"),
+                 (300, "192.0.2.10", "port_scan", 1, "Investigating")],
+            )
+
+    def test_stats_match_filtered_table_counts(self):
+        self.seed_filter_records()
+        filters = {"ip": "192.0.2.10", "start_date": "150", "end_date": "350"}
+        summary = db.stats(filters)
+        self.assertEqual(summary["traffic"], 1)
+        self.assertEqual(summary["alerts"], 1)
+        self.assertEqual(summary["total_blocked"], 1)
+        self.assertEqual(summary["attacks"], [{"attack_type": "port_scan", "count": 1}])
+        for table in ("traffic", "alerts"):
+            self.assertEqual(summary[table], db.query(table, filters)["total"])
+
+    def test_stats_endpoint_honors_status(self):
+        self.seed_filter_records()
+        self.authenticate()
+        with patch("utils.firewall.get_active_blocks", return_value=[]):
+            response = self.client.get("/api/stats?status=Resolved")
+        self.assertEqual(response.status_code, 200)
+        summary = response.get_json()
+        self.assertEqual(summary["alerts"], 1)
+        self.assertEqual(summary["traffic"], 3)
+        self.assertEqual(summary["total_blocked"], 1)
+
+    def test_protocol_filter_does_not_query_missing_alert_column(self):
+        self.seed_filter_records()
+        self.assertEqual(db.query("traffic", {"protocol": "TCP"})["total"], 2)
+        self.assertEqual(db.query("alerts", {"protocol": "TCP"})["total"], 3)
+        self.assertEqual(db.stats({"protocol": "TCP"})["traffic"], 2)
+
+    def test_invalid_date_filters_return_400(self):
+        self.authenticate()
+        for query in ("start_date=invalid", "end_date=nan", "start_date=inf",
+                      "start_date=300&end_date=100"):
+            for endpoint in ("/api/traffic", "/api/alerts", "/export/alerts.csv"):
+                with self.subTest(query=query, endpoint=endpoint):
+                    response = self.client.get(endpoint + "?" + query)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("error", response.get_json())
+
+    def test_date_only_end_includes_fractional_last_second(self):
+        start = db._parse_date("2026-01-01")
+        with db.connect() as connection:
+            connection.executemany(
+                "INSERT INTO traffic(timestamp,src_ip) VALUES(?,?)",
+                [(start + 86399.5, "192.0.2.10"), (start + 86400, "192.0.2.10")],
+            )
+        self.assertEqual(db.query("traffic", {"end_date": "2026-01-01"})["total"], 1)
+
+    def test_stats_no_matches_and_epoch_zero(self):
+        self.seed_filter_records()
+        summary = db.stats({"end_date": "0"})
+        self.assertEqual(summary["traffic"], 0)
+        self.assertEqual(summary["alerts"], 0)
+        self.assertEqual(summary["attacks"], [])
+        self.assertEqual(db._parse_date(0), 0)
+
+    def test_database_initialization_preserves_records(self):
+        self.seed_filter_records()
+        db.init_db()
+        db.init_db()
+        self.assertEqual(db.query("traffic")["total"], 3)
+        self.assertEqual(db.query("alerts")["total"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
